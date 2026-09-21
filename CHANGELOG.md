@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.81.0](https://github.com/apsawhney-stack/no-mistakes/compare/v1.80.0...v1.81.0) (2026-09-21)
+
+
+### Features
+
+* **pipeline:** add durable finding ledger ([#1](https://github.com/apsawhney-stack/no-mistakes/issues/1)) ([1b9e055](https://github.com/apsawhney-stack/no-mistakes/commit/1b9e05557ef8d9c056fe6e742fbfeba9c1653f42))
+
+
+### Bug Fixes
+
+* **pipeline:** preserve recorded human fix decisions ([#1135](https://github.com/apsawhney-stack/no-mistakes/issues/1135)) ([2c3a301](https://github.com/apsawhney-stack/no-mistakes/commit/2c3a3013d2a221f4549d7fa7c458a11ef88023e5))
+
 ## [1.80.0](https://github.com/kunchenguid/no-mistakes/compare/v1.79.0...v1.80.0) (2026-09-20)
 
 
