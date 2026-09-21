@@ -99,6 +99,30 @@ func TestAutoFixableFindingsJSON_AllAskUser(t *testing.T) {
 	}
 }
 
+func TestAutoFixableLedgerFindingsJSON_OnlyOpenLedgerEntriesCanStartFixRounds(t *testing.T) {
+	raw := `{"findings":[` +
+		`{"id":"review-1","ledger_id":"fn-open","severity":"error","description":"open","action":"auto-fix"},` +
+		`{"id":"review-2","ledger_id":"fn-pending","severity":"error","description":"pending","action":"auto-fix"},` +
+		`{"id":"review-3","ledger_id":"fn-reconcile","severity":"error","description":"reconcile","action":"auto-fix"},` +
+		`{"id":"review-4","severity":"error","description":"step-owned","action":"auto-fix"}],` +
+		`"ledger":{"protocol_version":"v1","run_id":"run-1","total_entries":3,"open_count":1,"pending_count":1,"reconcile_count":1,"has_blocking":true,"entries":[` +
+		`{"id":"fn-open","step_name":"review","reported_id":"review-1","severity":"error","action":"auto-fix","description":"open","status":"open","is_blocking":true,"first_seen_round":1,"last_observed_round":1},` +
+		`{"id":"fn-pending","step_name":"review","reported_id":"review-2","severity":"error","action":"auto-fix","description":"pending","status":"pending_verification","is_blocking":true,"first_seen_round":1,"last_observed_round":1},` +
+		`{"id":"fn-reconcile","step_name":"review","reported_id":"review-3","severity":"error","action":"auto-fix","description":"reconcile","status":"needs_reconciliation","is_blocking":true,"first_seen_round":1,"last_observed_round":1}]}}`
+
+	fixableRaw := autoFixableLedgerFindingsJSON(raw)
+	fixable, err := types.ParseFindingsJSON(fixableRaw)
+	if err != nil {
+		t.Fatalf("parse ledger auto-fixable findings: %v", err)
+	}
+	if len(fixable.Items) != 2 {
+		t.Fatalf("expected open ledger and step-owned findings, got %#v", fixable.Items)
+	}
+	if fixable.Items[0].LedgerID != "fn-open" || fixable.Items[1].Description != "step-owned" {
+		t.Fatalf("unexpected fixable findings: %#v", fixable.Items)
+	}
+}
+
 func TestAutoFixableFindingsJSON_EmptyInput(t *testing.T) {
 	if got := autoFixableFindingsJSON(""); got != "" {
 		t.Fatalf("expected empty string for empty input, got %q", got)

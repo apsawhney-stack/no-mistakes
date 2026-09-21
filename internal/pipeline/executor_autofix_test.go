@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -59,6 +60,14 @@ func TestExecutor_AutoFixTriggersWithoutApproval(t *testing.T) {
 	}
 }
 
+// TestExecutor_AutoFixCarriesUnselectedFindingsSeparately pins the split between
+// the findings one auto-fix round hands the fixer and the ones it defers, and
+// pins that the deferred finding is still waiting at the gate afterwards.
+//
+// The step's rounds run on a goroutine and the resulting gate is driven,
+// because the deferred ask-user finding is not allowed to disappear: an
+// unselected entry stays open and blocking, so the run parks instead of
+// completing over it.
 func TestExecutor_AutoFixCarriesUnselectedFindingsSeparately(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := t.TempDir()
@@ -87,9 +96,53 @@ func TestExecutor_AutoFixCarriesUnselectedFindingsSeparately(t *testing.T) {
 	}}
 
 	exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{CI: 1}}, nil, []Step{step}, nil)
-	if err := exec.Execute(context.Background(), run, repo, workDir); err != nil {
-		t.Fatalf("Execute() error = %v", err)
+	done := make(chan error, 1)
+	go func() {
+		done <- exec.Execute(context.Background(), run, repo, workDir)
+	}()
+
+	// ci-1 is closed by the ledger's verified-closure path (the fix round
+	// re-ran clean on the corrected revision); ci-2 was never selected, so it
+	// must still be waiting for a decision at the gate.
+	waitForStepStatus(t, database, run.ID, types.StepCI, types.StepStatusFixReview)
+	sr := findingsStepResult(t, database, run.ID, types.StepCI)
+	if sr.FindingsJSON == nil {
+		t.Fatal("expected the parked gate to carry the unselected finding")
 	}
+	parked, err := types.ParseFindingsJSON(*sr.FindingsJSON)
+	if err != nil {
+		t.Fatalf("parse parked findings: %v", err)
+	}
+	if len(parked.Items) != 1 || parked.Items[0].ID != "ci-2" {
+		t.Fatalf("parked findings = %+v, want only the unselected ci-2", parked.Items)
+	}
+
+	if err := exec.Respond(types.StepCI, types.ActionApprove, nil); err != nil {
+		t.Fatalf("respond approve: %v", err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("executor timed out after approving the gate")
+	}
+}
+
+func findingsStepResult(t *testing.T, database *db.DB, runID string, name types.StepName) *db.StepResult {
+	t.Helper()
+	steps, err := database.GetStepsByRun(runID)
+	if err != nil {
+		t.Fatalf("get steps: %v", err)
+	}
+	for _, s := range steps {
+		if s.StepName == name {
+			return s
+		}
+	}
+	t.Fatalf("no step result for %s", name)
+	return nil
 }
 
 func TestExecutor_PersistsEffectiveAutoFixLimit(t *testing.T) {
@@ -118,6 +171,60 @@ func TestExecutor_PersistsEffectiveAutoFixLimit(t *testing.T) {
 	}
 	if steps[0].AutoFixLimit == nil || *steps[0].AutoFixLimit != 2 {
 		t.Fatalf("auto-fix limit = %v, want 2", steps[0].AutoFixLimit)
+	}
+}
+
+func TestExecutor_AutoFixSelectionUsesLedgerDisplayIDs(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+	calls := 0
+	step := &adaptiveCallStep{name: types.StepLint, fn: func(sctx *StepContext) (*StepOutcome, error) {
+		calls++
+		if calls == 1 {
+			return &StepOutcome{
+				NeedsApproval: true,
+				AutoFixable:   true,
+				Findings: `{"findings":[` +
+					`{"id":"lint-1","severity":"error","file":"a.go","line":1,"description":"first lint","action":"auto-fix"},` +
+					`{"id":"lint-1","severity":"error","file":"b.go","line":2,"description":"second lint","action":"auto-fix"}` +
+					`],"summary":"two lint findings"}`,
+			}, nil
+		}
+		selected, err := types.ParseFindingsJSON(sctx.PreviousFindings)
+		if err != nil {
+			t.Fatalf("parse selected findings: %v", err)
+		}
+		if len(selected.Items) != 2 {
+			t.Fatalf("selected findings = %+v, want both auto-fix findings", selected.Items)
+		}
+		ids := map[string]string{}
+		for _, item := range selected.Items {
+			ids[item.File] = item.ID
+		}
+		if ids["a.go"] != "lint-1" || ids["b.go"] != "lint-2" {
+			t.Fatalf("selected IDs = %+v, want ledger display IDs lint-1/lint-2", ids)
+		}
+		return &StepOutcome{ExitCode: 0}, nil
+	}}
+
+	exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{Lint: 1}}, nil, []Step{step}, nil)
+	if err := exec.Execute(context.Background(), run, repo, workDir); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("calls = %d, want initial plus auto-fix", calls)
+	}
+	entries, err := database.GetFindingLedgerEntriesByStep(run.ID, types.StepLint)
+	if err != nil {
+		t.Fatalf("ledger entries: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("entries = %+v, want two", entries)
+	}
+	for _, entry := range entries {
+		if entry.Status != types.FindingLedgerStatusClosedVerified {
+			t.Fatalf("entry %s (%s) status = %q, want closed_verified", entry.ReportedID, entry.File, entry.Status)
+		}
 	}
 }
 
@@ -305,7 +412,7 @@ func TestExecutor_AutoFixInfoFindings(t *testing.T) {
 		fn: func(sctx *StepContext) (*StepOutcome, error) {
 			callCount++
 			if callCount == 1 {
-				// Info findings that are auto-fixable (not blocking, but fixable)
+				// Info findings can still be auto-fixable and enter the fix loop.
 				return &StepOutcome{
 					NeedsApproval: false,
 					AutoFixable:   true,
@@ -519,5 +626,62 @@ func TestExecutor_ParkedStepReleasesLogFileAfterCancel(t *testing.T) {
 	// (run 31829193856). Cancel must close the log before cleanup.
 	if err := os.Remove(logPath); err != nil {
 		t.Fatalf("parked step must close lint.log on cancel so the worktree can be removed: %v", err)
+	}
+}
+
+// TestExecutor_LedgerDoesNotParkAnInfoOnlyFinding pins the product semantics the
+// durable ledger must preserve: an informational, explicitly non-blocking
+// finding keeps the behavior it had before the ledger existed - the step
+// completes, the run completes, and terminal acceptance is satisfied - while the
+// finding stays visible in the ledger rather than being silently dropped.
+//
+// The companion half (blocking, pending verification, and reconciliation still
+// park) is pinned by TestLedgerRequiresDispositionParksForTerminalRefusals, whose
+// gate rule is the union of the ledger clause and the blocking/ask-user paths.
+func TestExecutor_LedgerDoesNotParkAnInfoOnlyFinding(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+
+	step := &adaptiveCallStep{name: types.StepReview, fn: func(sctx *StepContext) (*StepOutcome, error) {
+		return &StepOutcome{
+			// Non-blocking: informational and no-op, so neither the severity
+			// checks nor the ledger's pending/reconciliation clause parks.
+			Findings:        `{"findings":[{"id":"info-1","severity":"info","description":"nit","action":"no-op"}],"summary":"1 note"}`,
+			ReviewedPaths:   []string{"main.go"},
+			ReviewablePaths: []string{"main.go"},
+		}, nil
+	}}
+
+	exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
+	done := make(chan error, 1)
+	go func() { done <- exec.Execute(context.Background(), run, repo, workDir) }()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("an info-only finding parked its step")
+	}
+
+	// The finding is still durable and visible, and it never counted as fixed.
+	entries, err := database.GetFindingLedgerEntries(run.ID)
+	if err != nil {
+		t.Fatalf("ledger entries: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Status != types.FindingLedgerStatusOpen {
+		t.Fatalf("ledger entries = %+v, want one still-open entry", entries)
+	}
+	if entries[0].IsBlocking {
+		t.Fatalf("info/no-op entry recorded as blocking: %+v", entries[0])
+	}
+	sr := findingsStepResult(t, database, run.ID, types.StepReview)
+	stats, err := database.StepFindingStats(sr)
+	if err != nil {
+		t.Fatalf("stats: %v", err)
+	}
+	if stats.ReportedFindings != 1 || stats.FixedFindings != 0 {
+		t.Fatalf("stats = %+v, want 1 reported and 0 fixed", stats)
 	}
 }

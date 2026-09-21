@@ -1048,6 +1048,9 @@ func TestTestStep_FixMode_AgentWritesNewTests_ProceedsAutomatically(t *testing.T
 	for _, item := range f.Items {
 		if strings.Contains(item.Description, "component.spec.tsx") {
 			foundTestFile = true
+			if item.ID != types.FindingIDTestAgentNewTestFile {
+				t.Errorf("expected new-test-file finding id %q, got %q", types.FindingIDTestAgentNewTestFile, item.ID)
+			}
 			if item.Action != types.ActionNoOp {
 				t.Errorf("expected new-test-file finding action %q, got %q", types.ActionNoOp, item.Action)
 			}

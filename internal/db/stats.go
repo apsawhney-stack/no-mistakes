@@ -108,11 +108,10 @@ func (d *DB) aggregateRunStats(runID string, stepStats map[types.StepName]*StepS
 	runReported := 0
 	runFixed := 0
 	for _, step := range steps {
-		rounds, err := d.GetRoundsByStep(step.ID)
+		findingStats, err := d.StepFindingStats(step)
 		if err != nil {
 			return 0, 0, err
 		}
-		findingStats := stepFindingStats(step, rounds)
 		reported, fixed := findingStats.ReportedFindings, findingStats.FixedFindings
 
 		runReported += reported
@@ -173,7 +172,29 @@ func (d *DB) FixedFindingsByStep(step *StepResult) (int, error) {
 }
 
 // StepFindingStats returns reported and fixed finding counts for a single step.
+//
+// When finding ledger entries exist, fixed findings are strictly verified code
+// fixes (closed_verified), not explicit operator approvals or waivers: an
+// accepted exception, a not-applicable decision, a supersession, and a
+// legacy-imported reconciliation are all reported as reported-but-not-fixed, so
+// a waived finding can never read as a repaired one. Step-owned operator parks
+// (budget cuts, protected-path refusals, a failing configured test command) stay
+// out of both counts, exactly as they were before the ledger existed.
 func (d *DB) StepFindingStats(step *StepResult) (StepStats, error) {
+	stats := StepStats{StepName: step.StepName}
+	entries, err := d.GetFindingLedgerEntriesByStep(step.RunID, step.StepName)
+	if err == nil && len(entries) > 0 {
+		for _, e := range entries {
+			if types.IsStepOwnedFinding(types.Finding{ID: e.ReportedID, Category: e.Category}) {
+				continue
+			}
+			stats.ReportedFindings++
+			if e.Status == types.FindingLedgerStatusClosedVerified {
+				stats.FixedFindings++
+			}
+		}
+		return stats, nil
+	}
 	rounds, err := d.GetRoundsByStep(step.ID)
 	if err != nil {
 		return StepStats{}, err
@@ -181,9 +202,10 @@ func (d *DB) StepFindingStats(step *StepResult) (StepStats, error) {
 	return stepFindingStats(step, rounds), nil
 }
 
-// findingItems returns the findings that count as mistakes. A Test budget cut
-// is an operator decision about the invocation budget, not a code mistake, so
-// it is neither reported nor, when a later round no longer carries it, fixed.
+// findingItems returns the findings that count as mistakes. Step-owned
+// findings are operator decisions or informational live state, not code
+// mistakes, so they are neither reported nor, when a later round no longer
+// carries them, fixed.
 func findingItems(raw *string) []types.Finding {
 	if raw == nil || *raw == "" {
 		return nil
@@ -192,9 +214,7 @@ func findingItems(raw *string) []types.Finding {
 	if err != nil {
 		return nil
 	}
-	return slices.DeleteFunc(findings.Items, func(item types.Finding) bool {
-		return item.ID == types.FindingIDTestAgentTimeout || item.ID == types.FindingIDTestAgentUnvalidatedWork
-	})
+	return slices.DeleteFunc(findings.Items, types.IsStepOwnedFinding)
 }
 
 func findingStatsKey(item types.Finding) types.Finding {

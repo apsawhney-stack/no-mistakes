@@ -376,8 +376,9 @@ type RunInfo struct {
 	// OverrideReason (see StepResultInfo.OverrideReason). It is derived from
 	// Steps rather than a separate DB column, so a run-level consumer such as
 	// axi's outcome wording does not need to inspect every step itself.
-	CIOverrideReason   string `json:"ci_override_reason,omitempty"`
-	TestOverrideReason string `json:"test_override_reason,omitempty"`
+	CIOverrideReason   string                      `json:"ci_override_reason,omitempty"`
+	TestOverrideReason string                      `json:"test_override_reason,omitempty"`
+	FindingLedger      *types.FindingLedgerSummary `json:"finding_ledger,omitempty"`
 	// StateRev is the monotonic run-state revision this snapshot is at least
 	// as new as. It is sampled before the database read, so every event at or
 	// below it is already reflected here and every event above it still
@@ -426,8 +427,9 @@ type StepResultInfo struct {
 	// step's gate despite an unresolved external condition (currently: the CI
 	// step's live checks were still failing). See
 	// pipeline.ApprovalOverrideVerifier and db.StepResult.OverrideReason.
-	OverrideReason string `json:"override_reason,omitempty"`
-	SkipReason     string `json:"skip_reason,omitempty"`
+	OverrideReason string                      `json:"override_reason,omitempty"`
+	SkipReason     string                      `json:"skip_reason,omitempty"`
+	FindingLedger  *types.FindingLedgerSummary `json:"finding_ledger,omitempty"`
 }
 
 // --- Events (for subscribe stream) ---

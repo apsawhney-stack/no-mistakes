@@ -7,7 +7,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-const protectedPathFindingID = "protected-path-refusal"
+const protectedPathFindingID = types.FindingIDProtectedPathRefusal
 
 // HasProtectedPathRefusal identifies gates that require an explicit response.
 func HasProtectedPathRefusal(findingsJSON string) bool {

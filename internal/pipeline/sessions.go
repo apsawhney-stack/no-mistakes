@@ -125,6 +125,16 @@ func (rs *RunSessions) id(role SessionRole) agent.SessionRef {
 	return rs.ids[role]
 }
 
+// SessionID returns the durable session identity currently recorded for a role,
+// or "" when the role has never run a resumable turn. Nil-safe so callers do
+// not need to know whether session reuse is configured.
+func (rs *RunSessions) SessionID(role SessionRole) string {
+	if rs == nil {
+		return ""
+	}
+	return rs.id(role).ID
+}
+
 // remember stores the role's latest session identity in memory and persists
 // it so the run can resume the session across daemon process boundaries.
 // Persistence failures are ignored: reuse degrades, correctness does not.

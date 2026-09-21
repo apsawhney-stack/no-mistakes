@@ -132,6 +132,7 @@ type runView struct {
 	// genuinely green run in agent-facing output.
 	CIOverrideReason   string
 	TestOverrideReason string
+	FindingLedger      *types.FindingLedgerSummary
 }
 
 func runViewFromIPC(r *ipc.RunInfo) runView {
@@ -146,6 +147,7 @@ func runViewFromIPC(r *ipc.RunInfo) runView {
 		CIOverrideReason:   r.CIOverrideReason,
 		TestOverrideReason: r.TestOverrideReason,
 		PiProfile:          r.PiProfile,
+		FindingLedger:      r.FindingLedger,
 	}
 	if r.PRURL != nil {
 		rv.PRURL = *r.PRURL
@@ -233,6 +235,11 @@ func runViewFromDB(r *db.Run, steps []*db.StepResult, database *db.DB) runView {
 			rv.CIOverrideReason = *s.OverrideReason
 		}
 		rv.Steps = append(rv.Steps, sv)
+	}
+	if database != nil {
+		if summary, err := database.GetFindingLedgerSummary(r.ID); err == nil && summary != nil && summary.TotalEntries > 0 {
+			rv.FindingLedger = summary
+		}
 	}
 	return rv
 }
@@ -496,6 +503,19 @@ func runObjectFieldWithKey(key string, rv runView) toon.Field {
 		fields = append(fields, toon.Field{Key: "pr", Value: rv.PRURL})
 	}
 	fields = append(fields, toon.Field{Key: "findings", Value: rv.findingsTally()})
+	if rv.FindingLedger != nil && rv.FindingLedger.TotalEntries > 0 {
+		// The versioned summary's blocking counts ride every status read, so an
+		// unattended caller can tell "nothing outstanding" from "waiting for a
+		// decision" without parsing the step payloads.
+		fields = append(fields, toon.Field{Key: "finding_ledger", Value: toon.NewObject(
+			toon.Field{Key: "version", Value: rv.FindingLedger.ProtocolVersion},
+			toon.Field{Key: "total", Value: rv.FindingLedger.TotalEntries},
+			toon.Field{Key: "open", Value: rv.FindingLedger.OpenCount},
+			toon.Field{Key: "pending", Value: rv.FindingLedger.PendingCount},
+			toon.Field{Key: "reconcile", Value: rv.FindingLedger.ReconcileCount},
+			toon.Field{Key: "closed", Value: rv.FindingLedger.ClosedCount},
+		)})
+	}
 
 	rows := make([]stepRow, 0, len(rv.Steps))
 	sharedRows := make([]sharedWorkRow, 0, 1)
@@ -582,6 +602,14 @@ func gateFieldsWithHelp(gate stepView, help []string) []toon.Field {
 	// unless config explicitly opts back in.
 	if gate.Name == string(types.StepReview) {
 		gfields = append(gfields, toon.Field{Key: "note", Value: "Review auto-fix is disabled by default (`auto_fix.review: 0`; a repo or global `auto_fix.review > 0` override re-enables it), so blocking and ask-user review findings park for your decision rather than being silently self-fixed."})
+	}
+	if parsed.Ledger != nil && parsed.Ledger.TotalEntries > 0 {
+		gfields = append(gfields, toon.Field{Key: "finding_ledger", Value: toon.NewObject(
+			toon.Field{Key: "version", Value: parsed.Ledger.ProtocolVersion},
+			toon.Field{Key: "open", Value: parsed.Ledger.OpenCount},
+			toon.Field{Key: "pending", Value: parsed.Ledger.PendingCount},
+			toon.Field{Key: "reconcile", Value: parsed.Ledger.ReconcileCount},
+		)})
 	}
 	rows := make([]findingRow, 0, len(parsed.Items))
 	for _, f := range parsed.Items {

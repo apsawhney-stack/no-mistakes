@@ -200,6 +200,75 @@ CREATE TABLE IF NOT EXISTS uncertified_pipeline_ranges (
     created_at    INTEGER NOT NULL,
     PRIMARY KEY (repo_id, branch)
 );
+
+CREATE TABLE IF NOT EXISTS finding_ledger_entries (
+    id                          TEXT PRIMARY KEY,
+    run_id                      TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    repo_id                     TEXT NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    step_name                   TEXT NOT NULL,
+    first_seen_round            INTEGER NOT NULL,
+    first_seen_step_result_id   TEXT NOT NULL REFERENCES step_results(id) ON DELETE CASCADE,
+    reported_id                 TEXT NOT NULL,
+    fingerprint                 TEXT NOT NULL,
+    severity                    TEXT NOT NULL,
+    action                      TEXT NOT NULL,
+    file                        TEXT NOT NULL DEFAULT '',
+    line                        INTEGER NOT NULL DEFAULT 0,
+    description                 TEXT NOT NULL,
+    category                    TEXT NOT NULL DEFAULT '',
+    check_name                  TEXT NOT NULL DEFAULT '',
+    check_id                    TEXT NOT NULL DEFAULT '',
+    decision_id                 TEXT NOT NULL DEFAULT '',
+    source                      TEXT NOT NULL DEFAULT '',
+    user_instructions           TEXT NOT NULL DEFAULT '',
+    review_scope                TEXT NOT NULL DEFAULT '',
+    original_finding_json       TEXT NOT NULL,
+    current_finding_json        TEXT NOT NULL,
+    status                      TEXT NOT NULL DEFAULT 'open',
+    is_blocking                 INTEGER NOT NULL DEFAULT 1,
+    selected_in_round           INTEGER,
+    correcting_commit_sha       TEXT,
+    fix_session_id              TEXT,
+    closed_in_round             INTEGER,
+    closure_evidence            TEXT,
+    closure_reason              TEXT,
+    disposition_provenance      TEXT,
+    last_observed_round         INTEGER NOT NULL,
+    last_observed_file          TEXT NOT NULL DEFAULT '',
+    last_observed_line          INTEGER NOT NULL DEFAULT 0,
+    created_at                  INTEGER NOT NULL,
+    updated_at                  INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_finding_ledger_run_status
+    ON finding_ledger_entries (run_id, step_name, status);
+
+CREATE INDEX IF NOT EXISTS idx_finding_ledger_fingerprint
+    ON finding_ledger_entries (run_id, fingerprint);
+
+CREATE TABLE IF NOT EXISTS finding_ledger_events (
+    id               TEXT PRIMARY KEY,
+    entry_id         TEXT NOT NULL REFERENCES finding_ledger_entries(id) ON DELETE CASCADE,
+    run_id           TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    step_name        TEXT NOT NULL,
+    round            INTEGER NOT NULL,
+    step_result_id   TEXT,
+    event_type       TEXT NOT NULL,
+    state_before     TEXT NOT NULL,
+    state_after      TEXT NOT NULL,
+    commit_sha       TEXT,
+    session_id       TEXT,
+    evidence         TEXT,
+    reason           TEXT,
+    provenance       TEXT,
+    created_at       INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_finding_ledger_events_entry
+    ON finding_ledger_events (entry_id, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_finding_ledger_events_run
+    ON finding_ledger_events (run_id, created_at);
 `
 
 // migrationStatements hold additive schema changes applied to databases that
@@ -336,4 +405,75 @@ var migrationStatements = []string{
 	`ALTER TABLE agent_invocations ADD COLUMN workload_lines INTEGER`,
 	`ALTER TABLE agent_invocations ADD COLUMN finding_count INTEGER`,
 	`ALTER TABLE step_results ADD COLUMN approval_reason TEXT`,
+	`CREATE TABLE IF NOT EXISTS finding_ledger_entries (
+		id                          TEXT PRIMARY KEY,
+		run_id                      TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+		repo_id                     TEXT NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+		step_name                   TEXT NOT NULL,
+		first_seen_round            INTEGER NOT NULL,
+		first_seen_step_result_id   TEXT NOT NULL REFERENCES step_results(id) ON DELETE CASCADE,
+		reported_id                 TEXT NOT NULL,
+		fingerprint                 TEXT NOT NULL,
+		severity                    TEXT NOT NULL,
+		action                      TEXT NOT NULL,
+		file                        TEXT NOT NULL DEFAULT '',
+		line                        INTEGER NOT NULL DEFAULT 0,
+		description                 TEXT NOT NULL,
+		category                    TEXT NOT NULL DEFAULT '',
+		check_name                  TEXT NOT NULL DEFAULT '',
+		check_id                    TEXT NOT NULL DEFAULT '',
+		decision_id                 TEXT NOT NULL DEFAULT '',
+		source                      TEXT NOT NULL DEFAULT '',
+		user_instructions           TEXT NOT NULL DEFAULT '',
+		review_scope                TEXT NOT NULL DEFAULT '',
+		original_finding_json       TEXT NOT NULL,
+		current_finding_json        TEXT NOT NULL,
+		status                      TEXT NOT NULL DEFAULT 'open',
+		is_blocking                 INTEGER NOT NULL DEFAULT 1,
+		selected_in_round           INTEGER,
+		correcting_commit_sha       TEXT,
+		fix_session_id              TEXT,
+		closed_in_round             INTEGER,
+		closure_evidence            TEXT,
+		closure_reason              TEXT,
+		disposition_provenance      TEXT,
+		last_observed_round         INTEGER NOT NULL,
+		last_observed_file          TEXT NOT NULL DEFAULT '',
+		last_observed_line          INTEGER NOT NULL DEFAULT 0,
+		created_at                  INTEGER NOT NULL,
+		updated_at                  INTEGER NOT NULL
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_finding_ledger_run_status ON finding_ledger_entries (run_id, step_name, status)`,
+	`CREATE INDEX IF NOT EXISTS idx_finding_ledger_fingerprint ON finding_ledger_entries (run_id, fingerprint)`,
+	`CREATE TABLE IF NOT EXISTS finding_ledger_events (
+		id               TEXT PRIMARY KEY,
+		entry_id         TEXT NOT NULL REFERENCES finding_ledger_entries(id) ON DELETE CASCADE,
+		run_id           TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+		step_name        TEXT NOT NULL,
+		round            INTEGER NOT NULL,
+		step_result_id   TEXT,
+		event_type       TEXT NOT NULL,
+		state_before     TEXT NOT NULL,
+		state_after      TEXT NOT NULL,
+		commit_sha       TEXT,
+		session_id       TEXT,
+		evidence         TEXT,
+		reason           TEXT,
+		provenance       TEXT,
+		created_at       INTEGER NOT NULL
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_finding_ledger_events_entry ON finding_ledger_events (entry_id, created_at)`,
+	`CREATE INDEX IF NOT EXISTS idx_finding_ledger_events_run ON finding_ledger_events (run_id, created_at)`,
+	`ALTER TABLE finding_ledger_entries ADD COLUMN fix_session_id TEXT`,
+	// finding_ledger_migrations is the per-run import marker for pre-ledger
+	// history. Presence of ledger ENTRIES is not a safe marker: a process that
+	// dies partway through an import leaves entries behind, and "some entry
+	// exists" would then skip the rest of that run's history forever, silently
+	// certifying an incomplete import (see MigrateLegacyFindingLedgerForRun).
+	// The marker row is written in the same transaction as the import.
+	`CREATE TABLE IF NOT EXISTS finding_ledger_migrations (
+		run_id           TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+		protocol_version TEXT NOT NULL,
+		imported_at      INTEGER NOT NULL
+	)`,
 }

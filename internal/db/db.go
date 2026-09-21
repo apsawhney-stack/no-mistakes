@@ -77,6 +77,11 @@ func (d *DB) Close() error {
 	return d.sql.Close()
 }
 
+// NewID generates a new ULID with monotonic ordering.
+func NewID() string {
+	return newID()
+}
+
 // newID generates a new ULID with monotonic ordering.
 func newID() string {
 	entropyMu.Lock()

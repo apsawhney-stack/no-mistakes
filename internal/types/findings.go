@@ -3,6 +3,7 @@ package types
 import (
 	"encoding/json"
 	"fmt"
+	"path"
 	"slices"
 	"strings"
 )
@@ -121,6 +122,57 @@ const FindingIDTestAgentTimeout = "test-agent-timeout"
 // publish the work.
 const FindingIDTestAgentUnvalidatedWork = "test-agent-unvalidated-work"
 
+// FindingIDProtectedPathRefusal is the CI-step park when an automatic commit
+// was refused because a fix left edits on a protected path. Approve is refused
+// on that gate: the edit must be resolved and the retry driven with fix.
+const FindingIDProtectedPathRefusal = "protected-path-refusal"
+
+// FindingIDCIFixAgentTimeout is the CI-step park when an auto-fix invocation
+// burned its wall-clock budget. It is a budget/provider-slowness cut, not a
+// product defect; the operator decides whether to spend another budget.
+const FindingIDCIFixAgentTimeout = "ci-fix-agent-timeout"
+
+// FindingIDTestAgentNewTestFile is the Test-step note for a regression test file
+// the evidence agent wrote while validating the change. It is informational
+// live state, not a defect requiring durable disposition.
+const FindingIDTestAgentNewTestFile = "test-agent-new-test-file"
+
+// stepOwnedFindingIDs are the finding identities a pipeline step synthesizes
+// from live state on every round, rather than reporting them as claims about
+// the change under validation.
+var stepOwnedFindingIDs = []string{
+	FindingIDTestAgentTimeout,
+	FindingIDTestAgentUnvalidatedWork,
+	FindingIDProtectedPathRefusal,
+	FindingIDCIFixAgentTimeout,
+	FindingIDTestAgentNewTestFile,
+}
+
+// IsStepOwnedFinding reports whether f is an operator-decision park that its
+// own step synthesizes from live state rather than a claim about the change.
+//
+// These findings share one shape: the step re-derives them from a live
+// condition on every round (how long an invocation ran, what a configured test
+// command returned, whether a fix left edits on a protected path), Approve is
+// refused or qualified on them, and the condition clears by resolving that live
+// state rather than by repairing a reported defect. They are not repair targets,
+// so no fix round ever selects them.
+//
+// They keep their existing owner and are deliberately NOT admitted to the
+// durable finding ledger. A later round that omits one has re-measured the live
+// condition, which is the opposite of an analyzer's omission - the exact
+// ambiguity the ledger's "silence never closes a finding" rule exists to refuse.
+// Admitting them would leave an entry nothing can close and would park every
+// such gate forever. Their refusal, override, and exception semantics stay with
+// the step and the executor's ApprovalOverrideVerifier, and the stats that
+// already exclude the Test budget cuts keep excluding them.
+func IsStepOwnedFinding(f Finding) bool {
+	if f.Category == FindingCategoryTestCommand {
+		return true
+	}
+	return slices.Contains(stepOwnedFindingIDs, f.ID)
+}
+
 // Test scenario result constants: the vocabulary the test step's evidence
 // prompt instructs the agent to use for each derived scenario.
 //
@@ -200,6 +252,8 @@ type Finding struct {
 	// every non-CI finding.
 	Check   string `json:"check,omitempty"`
 	CheckID string `json:"check_id,omitempty"`
+	// LedgerID is the immutable per-run finding ledger entry identity.
+	LedgerID string `json:"ledger_id,omitempty"`
 }
 
 // TestScenario is one named end-to-end scenario the test step derived from the
@@ -271,6 +325,7 @@ type findingWire struct {
 	Category            string `json:"category,omitempty"`
 	Check               string `json:"check,omitempty"`
 	CheckID             string `json:"check_id,omitempty"`
+	LedgerID            string `json:"ledger_id,omitempty"`
 	RequiresHumanReview *bool  `json:"requires_human_review,omitempty"`
 }
 
@@ -308,28 +363,30 @@ type Findings struct {
 	// UnvalidatedSinceSHA is set only on a Test budget-cut park: the head its
 	// unvalidated-work check measured from, carried so a repeated cut before any
 	// evidence turn completes re-measures from that same head.
-	UnvalidatedSinceSHA string `json:"unvalidated_since_sha,omitempty"`
-	RiskLevel           string `json:"risk_level"`
-	RiskRationale       string `json:"risk_rationale"`
-	RiskScope           string `json:"risk_scope,omitempty"`
+	UnvalidatedSinceSHA string                `json:"unvalidated_since_sha,omitempty"`
+	RiskLevel           string                `json:"risk_level"`
+	RiskRationale       string                `json:"risk_rationale"`
+	RiskScope           string                `json:"risk_scope,omitempty"`
+	Ledger              *FindingLedgerSummary `json:"ledger,omitempty"`
 }
 
 type findingsWire struct {
-	DecisionReviews     []DecisionReview `json:"decision_reviews"`
-	Items               []Finding        `json:"findings"`
-	Legacy              []Finding        `json:"items"`
-	Summary             string           `json:"summary"`
-	ReviewedPaths       []string         `json:"reviewed_paths"`
-	Tested              []string         `json:"tested"`
-	TestingSummary      string           `json:"testing_summary"`
-	Artifacts           []TestArtifact   `json:"artifacts"`
-	Scenarios           []TestScenario   `json:"scenarios"`
-	Verdict             string           `json:"verdict"`
-	TestedHeadSHA       string           `json:"tested_head_sha"`
-	UnvalidatedSinceSHA string           `json:"unvalidated_since_sha"`
-	RiskLevel           string           `json:"risk_level"`
-	RiskRationale       string           `json:"risk_rationale"`
-	RiskScope           string           `json:"risk_scope"`
+	DecisionReviews     []DecisionReview      `json:"decision_reviews"`
+	Items               []Finding             `json:"findings"`
+	Legacy              []Finding             `json:"items"`
+	Summary             string                `json:"summary"`
+	ReviewedPaths       []string              `json:"reviewed_paths"`
+	Tested              []string              `json:"tested"`
+	TestingSummary      string                `json:"testing_summary"`
+	Artifacts           []TestArtifact        `json:"artifacts"`
+	Scenarios           []TestScenario        `json:"scenarios"`
+	Verdict             string                `json:"verdict"`
+	TestedHeadSHA       string                `json:"tested_head_sha"`
+	UnvalidatedSinceSHA string                `json:"unvalidated_since_sha"`
+	RiskLevel           string                `json:"risk_level"`
+	RiskRationale       string                `json:"risk_rationale"`
+	RiskScope           string                `json:"risk_scope"`
+	Ledger              *FindingLedgerSummary `json:"ledger"`
 }
 
 // ParseFindingsJSON decodes findings JSON, accepting current and legacy item
@@ -358,6 +415,7 @@ func ParseFindingsJSON(raw string) (Findings, error) {
 		RiskLevel:           wire.RiskLevel,
 		RiskRationale:       wire.RiskRationale,
 		RiskScope:           wire.RiskScope,
+		Ledger:              wire.Ledger,
 	}, nil
 }
 
@@ -387,7 +445,7 @@ func NormalizeFindings(findings Findings, prefix string) Findings {
 	return findings
 }
 
-// FilterFindings keeps only findings whose IDs are included in ids.
+// FilterFindings keeps only findings whose display or ledger IDs are included in ids.
 func FilterFindings(findings Findings, ids []string) Findings {
 	if len(ids) == 0 {
 		return findings
@@ -398,7 +456,7 @@ func FilterFindings(findings Findings, ids []string) Findings {
 	}
 	filtered := FindingsMetadata(findings)
 	for _, item := range findings.Items {
-		if selected[item.ID] {
+		if selected[item.ID] || (item.LedgerID != "" && selected[item.LedgerID]) {
 			filtered.Items = append(filtered.Items, item)
 		}
 	}
@@ -452,6 +510,12 @@ func MergeUserOverrides(findings Findings, instructions map[string]string, added
 	for i := range result.Items {
 		if note, ok := instructions[result.Items[i].ID]; ok {
 			result.Items[i].UserInstructions = note
+			continue
+		}
+		if result.Items[i].LedgerID != "" {
+			if note, ok := instructions[result.Items[i].LedgerID]; ok {
+				result.Items[i].UserInstructions = note
+			}
 		}
 	}
 	used := make(map[string]bool, len(result.Items)+len(added))
@@ -596,6 +660,7 @@ func (f *Finding) UnmarshalJSON(data []byte) error {
 	f.Category = wire.Category
 	f.Check = wire.Check
 	f.CheckID = wire.CheckID
+	f.LedgerID = wire.LedgerID
 	if f.Action == "" && wire.RequiresHumanReview != nil {
 		if *wire.RequiresHumanReview {
 			f.Action = ActionAskUser
@@ -619,4 +684,45 @@ func (f Finding) ActionOrDefault() string {
 		return ActionAskUser
 	}
 	return f.Action
+}
+
+// IsBlockingFinding reports whether a finding is blocking. Error and warning
+// findings, as well as any finding with action ask-user or auto-fix, are
+// blocking; only informational no-op findings are non-blocking.
+func IsBlockingFinding(f Finding) bool {
+	sev := NormalizeFindingSeverity(f.Severity)
+	act := f.ActionOrDefault()
+	if sev == FindingSeverityError || sev == FindingSeverityWarning {
+		return true
+	}
+	if act == ActionAskUser || act == ActionAutoFix {
+		return true
+	}
+	return false
+}
+
+// NormalizeFingerprint returns a deterministic string fingerprint for matching
+// findings across rounds when line numbers shift or positional labels drift.
+// Line numbers, IDs, user instructions, and transient actions are excluded.
+func NormalizeFingerprint(f Finding) string {
+	if did := strings.TrimSpace(f.DecisionID); did != "" {
+		return fmt.Sprintf("did=%s", did)
+	}
+	normFile := strings.TrimSpace(f.File)
+	if normFile != "" {
+		normFile = path.Clean(normFile)
+		if normFile == "." {
+			normFile = ""
+		}
+	}
+	normDesc := strings.Join(strings.Fields(f.Description), " ")
+	return fmt.Sprintf("file=%s|desc=%s|sev=%s|cat=%s|chk=%s|cid=%s|scope=%s",
+		normFile,
+		normDesc,
+		NormalizeFindingSeverity(f.Severity),
+		strings.TrimSpace(f.Category),
+		strings.TrimSpace(f.Check),
+		strings.TrimSpace(f.CheckID),
+		strings.TrimSpace(f.ReviewScope),
+	)
 }

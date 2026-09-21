@@ -229,3 +229,22 @@ func TestGetStatsDoesNotCountTestBudgetCutsAsFixedMistakes(t *testing.T) {
 		t.Fatalf("cut-only step = reported %d fixed %d, want 0/0", cutOnlyStats.ReportedFindings, cutOnlyStats.FixedFindings)
 	}
 }
+
+func TestStepFindingStatsFiltersStepOwnedFallbackFindings(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/repo/step-owned", "git@example.com:step-owned.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "head", "base")
+	step, _ := d.InsertStepResult(run.ID, types.StepTest)
+	findings := `{"findings":[{"id":"test-agent-new-test-file","severity":"info","description":"wrote a regression test","action":"no-op"}],"summary":"note"}`
+	if _, err := d.InsertStepRound(step.ID, 1, "initial", &findings, nil, 100); err != nil {
+		t.Fatal(err)
+	}
+
+	stats, err := d.StepFindingStats(step)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.ReportedFindings != 0 || stats.FixedFindings != 0 {
+		t.Fatalf("step-owned-only stats = reported %d fixed %d, want 0/0", stats.ReportedFindings, stats.FixedFindings)
+	}
+}

@@ -345,7 +345,7 @@ func TestRebaseMergeStrategyAgentResolvedConflictPublishesAMergeJourney(t *testi
 	h.PushToGate(branch)
 
 	run := waitForRebaseConflictGate(t, h, branch)
-	h.Respond(run.ID, types.StepRebase, types.ActionFix)
+	h.RespondWithFindings(run.ID, types.StepRebase, types.ActionFix, []string{"rebase-1"})
 
 	completed := h.WaitForRun(branch, 120*time.Second)
 	if completed.Status != types.RunCompleted {
@@ -391,7 +391,7 @@ func TestRebaseMergeStrategyRejectsAResolutionThatDidNotMergeJourney(t *testing.
 	h.PushToGate(branch)
 
 	run := waitForRebaseConflictGate(t, h, branch)
-	h.Respond(run.ID, types.StepRebase, types.ActionFix)
+	h.RespondWithFindings(run.ID, types.StepRebase, types.ActionFix, []string{"rebase-1"})
 
 	failed := h.WaitForRun(branch, 120*time.Second)
 	if failed.Status != types.RunFailed {
@@ -446,7 +446,7 @@ func TestRebaseMergeStrategyRejectsAnUnconcludedMergeJourney(t *testing.T) {
 	h.PushToGate(branch)
 
 	run := waitForRebaseConflictGate(t, h, branch)
-	h.Respond(run.ID, types.StepRebase, types.ActionFix)
+	h.RespondWithFindings(run.ID, types.StepRebase, types.ActionFix, []string{"rebase-1"})
 
 	failed := h.WaitForRun(branch, 120*time.Second)
 	if failed.Status != types.RunFailed {

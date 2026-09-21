@@ -92,6 +92,8 @@ type StepContext struct {
 	// OnPRMerged is a best-effort hook after a merged PR state is persisted.
 	// Eval uses it to relabel auto-fix/shipped-unfixed gold; nil is a no-op.
 	OnPRMerged func(ctx context.Context, runID string)
+	// FindingLedger manages the durable per-run finding ledger.
+	FindingLedger *FindingLedger
 }
 
 // RunAgentSession executes one turn of a durable review-loop role session,
@@ -132,6 +134,20 @@ type StepOutcome struct {
 	// round. The executor durably records it only when the review step actually
 	// completes, never while that outcome is parked or after a failed round.
 	ReviewApprovedHeadSHA string
+
+	// AgentSessionID is the agent session identity of the turn that produced
+	// this outcome, when the adapter reports one. The ledger uses it as the
+	// closure certifier's identity so a correction cannot be certified by the
+	// session that applied it. Empty is meaningful: a session-free invocation is
+	// a fresh turn, not an unidentified one.
+	AgentSessionID string
+	// AgentSessionResumed reports whether that turn CONTINUED an existing
+	// durable session (agent.Result.Resumed) rather than running cold. It is the
+	// signal that matters for closure independence: a session identity alone is
+	// not proof of resumption, because two cold invocations of some adapters
+	// report the same value, while a cold turn is by construction independent of
+	// every earlier session.
+	AgentSessionResumed bool
 
 	// DurationOverrideMS, when positive, replaces the wall-clock duration
 	// reported for this step. Used by demo mode to show realistic durations
