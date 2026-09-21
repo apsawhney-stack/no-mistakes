@@ -158,6 +158,22 @@ func TestFilterFindings_EmptyIDs(t *testing.T) {
 	}
 }
 
+func TestFilterFindings_MatchesLedgerID(t *testing.T) {
+	f := Findings{
+		Items: []Finding{
+			{ID: "review-1", LedgerID: "fn-a", Severity: "error", Description: "first"},
+			{ID: "review-2", LedgerID: "fn-b", Severity: "error", Description: "second"},
+		},
+	}
+	filtered := FilterFindings(f, []string{"fn-b"})
+	if len(filtered.Items) != 1 {
+		t.Fatalf("Items count = %d, want 1", len(filtered.Items))
+	}
+	if filtered.Items[0].ID != "review-2" {
+		t.Errorf("filtered item ID = %q, want review-2", filtered.Items[0].ID)
+	}
+}
+
 func TestParseFindingsJSON_Action(t *testing.T) {
 	raw := `{"findings":[{"severity":"warning","description":"design choice","action":"ask-user"},{"severity":"error","description":"bug","action":"auto-fix"}],"risk_level":"medium","risk_rationale":"Mixed."}`
 	f, err := ParseFindingsJSON(raw)

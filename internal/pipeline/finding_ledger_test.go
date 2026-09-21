@@ -1090,6 +1090,49 @@ func TestFindingLedger_SelectionResolvesDisplayIDsNotRawLabels(t *testing.T) {
 	}
 }
 
+func TestFindingLedger_SelectionIgnoresRawLabelRemintedElsewhere(t *testing.T) {
+	database, runID, repoID := setupTestDB(t)
+	ctx := context.Background()
+	ledger := NewFindingLedger(database, runID, repoID)
+
+	sr, err := database.InsertStepResult(runID, types.StepReview)
+	if err != nil {
+		t.Fatalf("insert step result: %v", err)
+	}
+	if _, err := ledger.ProcessRoundFindings(ctx, types.StepReview, sr.ID, 1, &StepOutcome{
+		Findings:        mustMarshalFindings(types.Findings{Items: []types.Finding{{ID: "review-1", Severity: "error", Action: types.ActionAutoFix, File: "a.go", Line: 3, Description: "first defect"}}}),
+		ReviewablePaths: []string{"a.go", "b.go"},
+		ReviewedPaths:   []string{"a.go", "b.go"},
+	}, "head-1"); err != nil {
+		t.Fatalf("round 1: %v", err)
+	}
+	if _, err := ledger.ProcessRoundFindings(ctx, types.StepReview, sr.ID, 2, &StepOutcome{
+		Findings:        mustMarshalFindings(types.Findings{Items: []types.Finding{{ID: "review-1", Severity: "error", Action: types.ActionAutoFix, File: "b.go", Line: 8, Description: "second defect"}}}),
+		ReviewablePaths: []string{"a.go", "b.go"},
+		ReviewedPaths:   []string{"a.go", "b.go"},
+	}, "head-1"); err != nil {
+		t.Fatalf("round 2: %v", err)
+	}
+
+	if err := ledger.ProcessSelection(ctx, types.StepReview, sr.ID, 2, []string{"review-1"}, "user"); err != nil {
+		t.Fatalf("selection: %v", err)
+	}
+	entries, err := database.GetFindingLedgerEntriesByStep(runID, types.StepReview)
+	if err != nil {
+		t.Fatalf("entries: %v", err)
+	}
+	statusByFile := map[string]string{}
+	for _, e := range entries {
+		statusByFile[e.File] = e.Status
+	}
+	if statusByFile["a.go"] != types.FindingLedgerStatusPendingVerification {
+		t.Fatalf("a.go status = %q, want pending_verification", statusByFile["a.go"])
+	}
+	if statusByFile["b.go"] != types.FindingLedgerStatusOpen {
+		t.Fatalf("b.go status = %q, want open", statusByFile["b.go"])
+	}
+}
+
 // TestFindingLedger_LineShiftKeepsOneIdentityWithBothObservations pins the
 // unambiguous moved-line case: one entry, both observations retained.
 func TestFindingLedger_LineShiftKeepsOneIdentityWithBothObservations(t *testing.T) {

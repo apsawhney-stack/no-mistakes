@@ -703,10 +703,10 @@ func assignDisplayIDs(stepName string, entries []*types.FindingLedgerEntry) map[
 	return assigned
 }
 
-// resolveLedgerSelection resolves the display IDs an operator selected to
-// ledger entry IDs. It accepts the immutable ledger ID, the display ID this
-// round shows, and the raw analyzed ID, in that order of authority, so a
-// response that used either vocabulary selects the entry the operator saw.
+// resolveLedgerSelection resolves the IDs an operator selected to ledger entry
+// IDs. It accepts the immutable ledger ID and the display ID this round shows,
+// so every accepted selector names the same entry in the fixer payload and the
+// ledger state transition.
 func (l *FindingLedger) resolveLedgerSelection(stepName types.StepName, entries []*types.FindingLedgerEntry, selectedIDs []string) map[string]bool {
 	selected := make(map[string]bool, len(selectedIDs))
 	for _, id := range selectedIDs {
@@ -726,18 +726,8 @@ func (l *FindingLedger) resolveLedgerSelection(stepName types.StepName, entries 
 	}
 	displayIDs := assignDisplayIDs(string(stepName), unresolved)
 	for _, e := range unresolved {
-		switch {
-		case selected[e.ID], selected[displayIDs[e.ID]]:
+		if selected[e.ID] || selected[displayIDs[e.ID]] {
 			matched[e.ID] = true
-		default:
-			var curFinding types.Finding
-			if json.Unmarshal([]byte(e.CurrentFindingJSON), &curFinding) == nil && curFinding.ID != "" {
-				// The raw analyzed label is the last resort, and only when this
-				// round did not re-mint it into someone else's display ID.
-				if !selected[displayIDs[e.ID]] && selected[curFinding.ID] {
-					matched[e.ID] = true
-				}
-			}
 		}
 	}
 	return matched

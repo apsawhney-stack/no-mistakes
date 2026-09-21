@@ -439,7 +439,7 @@ func NormalizeFindings(findings Findings, prefix string) Findings {
 	return findings
 }
 
-// FilterFindings keeps only findings whose IDs are included in ids.
+// FilterFindings keeps only findings whose display or ledger IDs are included in ids.
 func FilterFindings(findings Findings, ids []string) Findings {
 	if len(ids) == 0 {
 		return findings
@@ -450,7 +450,7 @@ func FilterFindings(findings Findings, ids []string) Findings {
 	}
 	filtered := FindingsMetadata(findings)
 	for _, item := range findings.Items {
-		if selected[item.ID] {
+		if selected[item.ID] || (item.LedgerID != "" && selected[item.LedgerID]) {
 			filtered.Items = append(filtered.Items, item)
 		}
 	}
