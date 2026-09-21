@@ -225,7 +225,9 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 		return e.failRun(run, repo, fmt.Errorf("create log dir: %w", err))
 	}
 
-	e.initializeRunScopes(run.ID, repo.ID)
+	if err := e.initializeRunScopes(run.ID, repo.ID); err != nil {
+		return e.failRun(run, repo, err)
+	}
 
 	// Create step result records in DB
 	stepRecords := make(map[types.StepName]*db.StepResult)
@@ -315,7 +317,7 @@ func (e *Executor) prepareRestart(runID string, name types.StepName, currentInde
 	return index, nil
 }
 
-func (e *Executor) initializeRunScopes(runID string, repoIDs ...string) {
+func (e *Executor) initializeRunScopes(runID string, repoIDs ...string) error {
 	sessionsEnabled := e.config != nil && e.config.SessionReuse && e.agent != nil
 	e.sessions = NewRunSessions(e.db, runID, e.agent, sessionsEnabled)
 	e.shared = &RunShared{}
@@ -325,7 +327,11 @@ func (e *Executor) initializeRunScopes(runID string, repoIDs ...string) {
 	}
 	if e.db != nil {
 		e.findingLedger = NewFindingLedger(e.db, runID, repoID)
+		if err := e.findingLedger.InitError(); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 // fixSessionID is the durable identity of the session this run's fixer role used,
@@ -421,7 +427,9 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
 		return e.failRun(run, repo, fmt.Errorf("create log dir: %w", err))
 	}
-	e.initializeRunScopes(run.ID, repo.ID)
+	if err := e.initializeRunScopes(run.ID, repo.ID); err != nil {
+		return e.failRun(run, repo, err)
+	}
 
 	parkStart := time.Unix(*run.AwaitingAgentSince, 0)
 	duration := recoveredStepDuration(gate.stepResult)
@@ -1081,7 +1089,9 @@ rounds:
 		effectiveFindings := roundFindings
 		if e.findingLedger != nil {
 			if sctx.Fixing && run.HeadSHA != "" {
-				_ = e.findingLedger.RecordCorrectingRevision(ctx, stepName, roundNum, run.HeadSHA, e.fixSessionID())
+				if err := e.findingLedger.RecordCorrectingRevision(ctx, stepName, roundNum, run.HeadSHA, e.fixSessionID()); err != nil {
+					return false, "", fmt.Errorf("step %s finding ledger correcting revision: %w", stepName, err)
+				}
 			}
 			var ledgerErr error
 			effectiveFindings, ledgerErr = e.findingLedger.ProcessRoundFindings(
@@ -1093,8 +1103,7 @@ rounds:
 				run.HeadSHA,
 			)
 			if ledgerErr != nil {
-				slog.Warn("failed to process round findings in finding ledger", "step", stepName, "error", ledgerErr)
-				effectiveFindings = roundFindings
+				return false, "", fmt.Errorf("step %s finding ledger: %w", stepName, ledgerErr)
 			}
 			if carryFindings {
 				outstandingFindings = effectiveFindings

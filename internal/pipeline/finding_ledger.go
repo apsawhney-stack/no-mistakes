@@ -15,22 +15,32 @@ import (
 
 // FindingLedger manages the durable per-run finding ledger for a pipeline execution.
 type FindingLedger struct {
-	db     *db.DB
-	runID  string
-	repoID string
-	mu     sync.Mutex
+	db      *db.DB
+	runID   string
+	repoID  string
+	initErr error
+	mu      sync.Mutex
 }
 
 // NewFindingLedger creates a new FindingLedger for the given run.
 func NewFindingLedger(database *db.DB, runID, repoID string) *FindingLedger {
+	var initErr error
 	if database != nil && runID != "" {
-		_ = database.MigrateLegacyFindingLedgerForRun(runID)
+		initErr = database.MigrateLegacyFindingLedgerForRun(runID)
 	}
 	return &FindingLedger{
-		db:     database,
-		runID:  runID,
-		repoID: repoID,
+		db:      database,
+		runID:   runID,
+		repoID:  repoID,
+		initErr: initErr,
 	}
+}
+
+func (l *FindingLedger) InitError() error {
+	if l == nil || l.initErr == nil {
+		return nil
+	}
+	return fmt.Errorf("initialize finding ledger for run %s: %w", l.runID, l.initErr)
 }
 
 // ProcessRoundFindings updates the durable ledger with the findings produced by one
@@ -50,6 +60,9 @@ func (l *FindingLedger) ProcessRoundFindings(
 	outcome *StepOutcome,
 	currentCommitSHA string,
 ) (string, error) {
+	if err := l.InitError(); err != nil {
+		return outcome.Findings, err
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -137,7 +150,9 @@ func (l *FindingLedger) ProcessRoundFindings(
 			if findingKey(curFinding) == itemKey {
 				pairedRoundIndex[i] = true
 				pairedLedgerID[e.ID] = true
-				l.handleMatchedFinding(e, item, roundNum, stepName, stepResultID)
+				if err := l.handleMatchedFinding(e, item, roundNum, stepName, stepResultID); err != nil {
+					return outcome.Findings, err
+				}
 				break
 			}
 		}
@@ -161,7 +176,9 @@ func (l *FindingLedger) ProcessRoundFindings(
 			if e.Fingerprint == fp && (e.DecisionID != "" || normalizeCoveredPath(e.File) == normFile) {
 				pairedRoundIndex[i] = true
 				pairedLedgerID[e.ID] = true
-				l.handleMatchedFinding(e, item, roundNum, stepName, stepResultID)
+				if err := l.handleMatchedFinding(e, item, roundNum, stepName, stepResultID); err != nil {
+					return outcome.Findings, err
+				}
 				break
 			}
 		}
@@ -206,7 +223,9 @@ func (l *FindingLedger) ProcessRoundFindings(
 			e.ClosureReason = "superseded by a fresh settled CI observation"
 			e.ClosureEvidence = fmt.Sprintf("settled CI observation at head %s reported no failing check", shortCommit(currentCommitSHA))
 			e.DispositionProvenance = "ci_settled_observation"
-			_ = l.db.UpdateFindingLedgerEntry(e)
+			if err := l.db.UpdateFindingLedgerEntry(e); err != nil {
+				return outcome.Findings, fmt.Errorf("update superseded finding ledger entry %s for step %s: %w", e.ID, stepName, err)
+			}
 
 			ev := &types.FindingLedgerEvent{
 				EntryID:      e.ID,
@@ -266,7 +285,9 @@ func (l *FindingLedger) ProcessRoundFindings(
 				e.ClosedInRound = roundNum
 				e.ClosureEvidence = evidence
 				e.ClosureReason = "verified fixed by independent closure review"
-				_ = l.db.UpdateFindingLedgerEntry(e)
+				if err := l.db.UpdateFindingLedgerEntry(e); err != nil {
+					return outcome.Findings, fmt.Errorf("update verified finding ledger entry %s for step %s: %w", e.ID, stepName, err)
+				}
 
 				ev := &types.FindingLedgerEvent{
 					EntryID:      e.ID,
@@ -365,7 +386,7 @@ func (l *FindingLedger) ProcessRoundFindings(
 			LastObservedLine:      item.Line,
 		}
 		if err := l.db.InsertFindingLedgerEntry(newEntry); err != nil {
-			return outcome.Findings, fmt.Errorf("admit finding ledger entry: %w", err)
+			return outcome.Findings, fmt.Errorf("admit finding ledger entry %s for step %s: %w", newEntry.ID, stepName, err)
 		}
 
 		ev := &types.FindingLedgerEvent{
@@ -392,7 +413,7 @@ func (l *FindingLedger) handleMatchedFinding(
 	roundNum int,
 	stepName types.StepName,
 	stepResultID string,
-) {
+) error {
 	itemJSON, _ := json.Marshal(item)
 	e.LastObservedRound = roundNum
 	e.LastObservedFile = item.File
@@ -418,7 +439,9 @@ func (l *FindingLedger) handleMatchedFinding(
 		e.ClosureEvidence = ""
 	}
 
-	_ = l.db.UpdateFindingLedgerEntry(e)
+	if err := l.db.UpdateFindingLedgerEntry(e); err != nil {
+		return fmt.Errorf("update matched finding ledger entry %s for step %s: %w", e.ID, stepName, err)
+	}
 
 	ev := &types.FindingLedgerEvent{
 		EntryID:      e.ID,
@@ -431,6 +454,7 @@ func (l *FindingLedger) handleMatchedFinding(
 		StateAfter:   e.Status,
 	}
 	_ = l.db.RecordFindingLedgerEvent(ev)
+	return nil
 }
 
 // certifierIsIndependent reports whether the turn that produced this round's
@@ -880,7 +904,9 @@ func (l *FindingLedger) RecordCorrectingRevision(
 		if e.Status == types.FindingLedgerStatusPendingVerification {
 			e.CorrectingCommitSHA = commitSHA
 			e.FixSessionID = sessionID
-			_ = l.db.UpdateFindingLedgerEntry(e)
+			if err := l.db.UpdateFindingLedgerEntry(e); err != nil {
+				return fmt.Errorf("update correcting revision for finding ledger entry %s in step %s: %w", e.ID, stepName, err)
+			}
 
 			ev := &types.FindingLedgerEvent{
 				EntryID:     e.ID,

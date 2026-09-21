@@ -37,6 +37,31 @@ func mustMarshalFindings(f types.Findings) string {
 	return s
 }
 
+func TestFindingLedger_InitMigrationFailureIsReported(t *testing.T) {
+	database, runID, repoID := setupTestDB(t)
+	if err := database.Close(); err != nil {
+		t.Fatalf("close db: %v", err)
+	}
+
+	ledger := NewFindingLedger(database, runID, repoID)
+	if err := ledger.InitError(); err == nil {
+		t.Fatal("InitError() = nil, want migration failure")
+	}
+	effective, err := ledger.ProcessRoundFindings(context.Background(), types.StepReview, "sr-1", 1, &StepOutcome{
+		Findings: mustMarshalFindings(types.Findings{Items: []types.Finding{{ID: "review-1", Severity: "error", Description: "blocking"}}}),
+	}, "head-1")
+	if err == nil {
+		t.Fatal("ProcessRoundFindings succeeded, want initialization failure")
+	}
+	parsed, parseErr := types.ParseFindingsJSON(effective)
+	if parseErr != nil {
+		t.Fatalf("parse returned findings: %v", parseErr)
+	}
+	if len(parsed.Items) != 1 {
+		t.Fatalf("returned items = %d, want original finding", len(parsed.Items))
+	}
+}
+
 func TestFindingLedger_AdmissionFailureFailsClosed(t *testing.T) {
 	database, runID, repoID := setupTestDB(t)
 	ctx := context.Background()
