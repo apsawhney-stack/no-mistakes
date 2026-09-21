@@ -21,6 +21,11 @@ func HasUnvalidatedWorkRefusal(findingsJSON string) bool {
 	return hasFindingID(findingsJSON, types.FindingIDTestAgentUnvalidatedWork)
 }
 
+// HasUnauthorizedWriteRefusal identifies gates where an unauthorized phase write was detected.
+func HasUnauthorizedWriteRefusal(findingsJSON string) bool {
+	return hasFindingID(findingsJSON, types.FindingIDUnauthorizedWriteRefusal)
+}
+
 func hasFindingID(findingsJSON, id string) bool {
 	findings, _ := types.ParseFindingsJSON(findingsJSON)
 	for _, finding := range findings.Items {
@@ -37,6 +42,8 @@ func approvalRefusal(step types.StepName, findingsJSON string) string {
 	switch {
 	case HasProtectedPathRefusal(findingsJSON):
 		return fmt.Sprintf("cannot approve a protected-path refusal: resolve the reported edit, then use fix to retry %s; approval would skip unfinished work", step)
+	case HasUnauthorizedWriteRefusal(findingsJSON):
+		return fmt.Sprintf("cannot approve an unauthorized-write refusal: resolve the unauthorized edits, then use fix to retry %s; approval would accept forbidden writes", step)
 	case HasUnvalidatedWorkRefusal(findingsJSON):
 		return fmt.Sprintf("cannot approve %s: the run worktree holds work no Test turn validated and approval would publish it; inspect it as the findings describe, then use fix to validate it, or abort", step)
 	}
@@ -66,6 +73,25 @@ func ProtectedPathOutcome(err error) *StepOutcome {
 			Description: err.Error(),
 			Action:      types.ActionAskUser,
 		}},
+	})
+	return &StepOutcome{NeedsApproval: true, Findings: findings}
+}
+
+// UnauthorizedWriteOutcome converts an unauthorized phase write verdict into a StepOutcome.
+func UnauthorizedWriteOutcome(phase types.StepName, paths []string, reason string) *StepOutcome {
+	var items []types.Finding
+	for _, p := range paths {
+		items = append(items, types.Finding{
+			ID:          types.FindingIDUnauthorizedWriteRefusal,
+			Severity:    "error",
+			File:        p,
+			Description: fmt.Sprintf("phase %s made unauthorized write to %q: %s", phase, p, reason),
+			Action:      types.ActionAskUser,
+		})
+	}
+	findings, _ := types.MarshalFindingsJSON(types.Findings{
+		Summary: fmt.Sprintf("Phase %s write-set violation: unauthorized writes detected", phase),
+		Items:   items,
 	})
 	return &StepOutcome{NeedsApproval: true, Findings: findings}
 }

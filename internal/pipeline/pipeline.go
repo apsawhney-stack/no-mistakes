@@ -94,6 +94,8 @@ type StepContext struct {
 	OnPRMerged func(ctx context.Context, runID string)
 	// FindingLedger manages the durable per-run finding ledger.
 	FindingLedger *FindingLedger
+	// WorkGenManager manages the work generations, phase write sets, and attestation.
+	WorkGenManager *WorkGenerationManager
 }
 
 // RunAgentSession executes one turn of a durable review-loop role session,

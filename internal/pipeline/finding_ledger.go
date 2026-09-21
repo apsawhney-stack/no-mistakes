@@ -283,9 +283,14 @@ func (l *FindingLedger) ProcessRoundFindings(
 				e.Status = types.FindingLedgerStatusClosedVerified
 				e.ClosedInRound = roundNum
 				e.ClosureEvidence = evidence
-				e.ClosureReason = "verified fixed by independent closure review"
-
+				closureReason := "verified fixed by independent closure review"
+				e.ClosureReason = closureReason
+				e.DispositionProvenance = "verified_clean_round"
+				if gen, gErr := l.db.GetCurrentWorkGeneration(l.runID); gErr == nil && gen != nil {
+					e.ClosureGenerationID = gen.ID
+				}
 				ev := &types.FindingLedgerEvent{
+					ID:           "fe-" + db.NewID(),
 					EntryID:      e.ID,
 					RunID:        l.runID,
 					StepName:     stepName,
@@ -298,6 +303,7 @@ func (l *FindingLedger) ProcessRoundFindings(
 					SessionID:    certifierSessionID,
 					Evidence:     evidence,
 					Reason:       e.ClosureReason,
+					GenerationID: e.ClosureGenerationID,
 				}
 				if err := l.db.UpdateFindingLedgerEntryWithEvent(e, ev); err != nil {
 					return outcome.Findings, fmt.Errorf("verify finding ledger entry %s for step %s: %w", e.ID, stepName, err)
@@ -358,6 +364,10 @@ func (l *FindingLedger) ProcessRoundFindings(
 		}
 		itemJSON, _ := json.Marshal(item)
 		isBlocking := types.IsBlockingFinding(item)
+		genID := ""
+		if gen, gErr := l.db.GetCurrentWorkGeneration(l.runID); gErr == nil && gen != nil {
+			genID = gen.ID
+		}
 		newEntry := &types.FindingLedgerEntry{
 			ID:                    "fn-" + db.NewID(),
 			RunID:                 l.runID,
@@ -383,6 +393,7 @@ func (l *FindingLedger) ProcessRoundFindings(
 			CurrentFindingJSON:    string(itemJSON),
 			Status:                types.FindingLedgerStatusOpen,
 			IsBlocking:            isBlocking,
+			GenerationID:          genID,
 			LastObservedRound:     roundNum,
 			LastObservedFile:      item.File,
 			LastObservedLine:      item.Line,
@@ -397,6 +408,7 @@ func (l *FindingLedger) ProcessRoundFindings(
 			StateBefore:  "",
 			StateAfter:   types.FindingLedgerStatusOpen,
 			CommitSHA:    currentCommitSHA,
+			GenerationID: genID,
 		}
 		if err := l.db.InsertFindingLedgerEntryWithEvent(newEntry, ev); err != nil {
 			return outcome.Findings, fmt.Errorf("admit finding ledger entry %s for step %s: %w", newEntry.ID, stepName, err)
@@ -439,6 +451,14 @@ func (l *FindingLedger) handleMatchedFinding(
 		e.ClosureEvidence = ""
 	}
 
+	genID := ""
+	if gen, gErr := l.db.GetCurrentWorkGeneration(l.runID); gErr == nil && gen != nil {
+		genID = gen.ID
+	}
+	if e.GenerationID == "" {
+		e.GenerationID = genID
+	}
+
 	ev := &types.FindingLedgerEvent{
 		EntryID:      e.ID,
 		RunID:        l.runID,
@@ -448,6 +468,7 @@ func (l *FindingLedger) handleMatchedFinding(
 		EventType:    types.FindingEventReportedAgain,
 		StateBefore:  stateBefore,
 		StateAfter:   e.Status,
+		GenerationID: genID,
 	}
 	if err := l.db.UpdateFindingLedgerEntryWithEvent(e, ev); err != nil {
 		return fmt.Errorf("record matched finding ledger entry %s for step %s: %w", e.ID, stepName, err)
@@ -795,6 +816,10 @@ func (l *FindingLedger) AdmitUserFindings(
 		if reportedID == "" {
 			reportedID = "user-" + strconv.Itoa(roundNum)
 		}
+		genID := ""
+		if gen, gErr := l.db.GetCurrentWorkGeneration(l.runID); gErr == nil && gen != nil {
+			genID = gen.ID
+		}
 		newEntry := &types.FindingLedgerEntry{
 			ID:                    entryID,
 			RunID:                 l.runID,
@@ -821,6 +846,7 @@ func (l *FindingLedger) AdmitUserFindings(
 			Status:                types.FindingLedgerStatusPendingVerification,
 			IsBlocking:            isBlocking,
 			SelectedInRound:       roundNum,
+			GenerationID:          genID,
 			LastObservedRound:     roundNum,
 			LastObservedFile:      item.File,
 			LastObservedLine:      item.Line,
@@ -837,6 +863,7 @@ func (l *FindingLedger) AdmitUserFindings(
 			StateBefore:  "",
 			StateAfter:   types.FindingLedgerStatusPendingVerification,
 			Provenance:   "user_added",
+			GenerationID: genID,
 			CreatedAt:    now,
 		}
 		if err := l.db.InsertFindingLedgerEntryWithEvent(newEntry, ev); err != nil {

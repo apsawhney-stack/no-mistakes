@@ -26,6 +26,7 @@ const (
 	FindingEventNotApplicable              = "not_applicable"
 	FindingEventSuperseded                 = "superseded"
 	FindingEventNeedsReconciliation        = "needs_reconciliation"
+	FindingEventGenerationInvalidated      = "generation_invalidated"
 )
 
 // IsUnresolvedLedgerStatus reports whether a ledger entry status is unresolved
@@ -84,6 +85,8 @@ type FindingLedgerEntry struct {
 	ClosureEvidence       string   `json:"closure_evidence,omitempty"`
 	ClosureReason         string   `json:"closure_reason,omitempty"`
 	DispositionProvenance string   `json:"disposition_provenance,omitempty"`
+	GenerationID          string   `json:"generation_id,omitempty"`
+	ClosureGenerationID   string   `json:"closure_generation_id,omitempty"`
 	LastObservedRound     int      `json:"last_observed_round"`
 	LastObservedFile      string   `json:"last_observed_file,omitempty"`
 	LastObservedLine      int      `json:"last_observed_line,omitempty"`
@@ -107,6 +110,7 @@ type FindingLedgerEvent struct {
 	Evidence     string   `json:"evidence,omitempty"`
 	Reason       string   `json:"reason,omitempty"`
 	Provenance   string   `json:"provenance,omitempty"`
+	GenerationID string   `json:"generation_id,omitempty"`
 	CreatedAt    int64    `json:"created_at"`
 }
 

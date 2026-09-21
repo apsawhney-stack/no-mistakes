@@ -590,6 +590,22 @@ func (s *PRStep) buildPipelineSectionFor(sctx *pipeline.StepContext, provider sc
 	if sctx.Config != nil {
 		policy.AllowTestCommandOverride = strings.TrimSpace(sctx.Config.Test.AllowApproveOverFailure)
 	}
+	if sctx.WorkGenManager != nil {
+		stepCtx := context.Background()
+		if sctx.Ctx != nil {
+			stepCtx = sctx.Ctx
+		}
+		if curGen, err := sctx.WorkGenManager.CurrentGeneration(stepCtx); err == nil && curGen != nil {
+			policy.WorkGenerationID = curGen.ID
+			policy.WorkGenerationDigest = curGen.GenerationDigest
+			policy.WorkPlanID = curGen.PlanID
+			policy.WorkPlanDigest = curGen.PlanDigest
+		}
+		if att, err := sctx.WorkGenManager.Attestation(stepCtx); err == nil && att != nil {
+			policy.WorkEnvelopeDigest = att.FinalEnvelopeDigest
+			policy.WorkAttestationDigest = att.AttestationDigest
+		}
+	}
 	pipelineMD, riskLine = buildPipelineSummaryFor(steps, rounds, sctx.Run.HeadSHA, provider, policy)
 	// Ordinary Bitbucket descriptions keep their existing Markdown-only skin.
 	// Owned templates additionally carry the exact existing declaration as

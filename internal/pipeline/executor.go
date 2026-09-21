@@ -57,10 +57,11 @@ type Executor struct {
 
 	// sessions manages this run's durable review-loop agent sessions; shared
 	// carries run-scoped step-to-step results. Both are created per Execute.
-	sessions      *RunSessions
-	shared        *RunShared
-	findingLedger *FindingLedger
-	workDir       string
+	sessions       *RunSessions
+	shared         *RunShared
+	findingLedger  *FindingLedger
+	workGenManager *WorkGenerationManager
+	workDir        string
 
 	mu                     sync.Mutex
 	approvalCh             chan approvalResponse // buffered channel for approval responses
@@ -229,6 +230,12 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 		return e.failRun(run, repo, err)
 	}
 
+	if e.workGenManager != nil {
+		if _, err := e.workGenManager.EnsureGeneration(ctx, run.HeadSHA); err != nil {
+			return e.failRun(run, repo, fmt.Errorf("initialize work generation: %w", err))
+		}
+	}
+
 	// Create step result records in DB
 	stepRecords := make(map[types.StepName]*db.StepResult)
 	for _, step := range e.steps {
@@ -250,6 +257,9 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 
 		sr := stepRecords[step.Name()]
 		if e.skips[step.Name()] {
+			if e.workGenManager != nil {
+				_, _ = e.workGenManager.RecordPhaseResult(ctx, step.Name(), types.PhaseResultStatusNotApplicable, string(step.Name()), "", "", nil)
+			}
 			if err := e.db.CompleteStepWithStatus(sr.ID, types.StepStatusSkipped, 0, 0, ""); err != nil {
 				return e.failRun(run, repo, fmt.Errorf("skip step %s: %w", step.Name(), err), ctx)
 			}
@@ -274,6 +284,9 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 				rsr := stepRecords[remaining.Name()]
 				if dbErr := e.db.CompleteStepWithStatus(rsr.ID, types.StepStatusSkipped, 0, 0, ""); dbErr != nil {
 					slog.Warn("failed to finalize skipped step", "step", remaining.Name(), "error", dbErr)
+				}
+				if e.workGenManager != nil {
+					_, _ = e.workGenManager.RecordPhaseResult(ctx, remaining.Name(), types.PhaseResultStatusNotApplicable, string(remaining.Name()), "", "", nil)
 				}
 				e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, remaining.Name(), string(types.StepStatusSkipped), "", "", nil)
 			}
@@ -317,6 +330,14 @@ func (e *Executor) prepareRestart(runID string, name types.StepName, currentInde
 	return index, nil
 }
 
+func (e *Executor) stepNames() []types.StepName {
+	names := make([]types.StepName, 0, len(e.steps))
+	for _, s := range e.steps {
+		names = append(names, s.Name())
+	}
+	return names
+}
+
 func (e *Executor) initializeRunScopes(runID string, repoIDs ...string) error {
 	sessionsEnabled := e.config != nil && e.config.SessionReuse && e.agent != nil
 	e.sessions = NewRunSessions(e.db, runID, e.agent, sessionsEnabled)
@@ -325,9 +346,19 @@ func (e *Executor) initializeRunScopes(runID string, repoIDs ...string) error {
 	if len(repoIDs) > 0 {
 		repoID = repoIDs[0]
 	}
+	if repoID == "" && e.db != nil && runID != "" {
+		if r, err := e.db.GetRun(runID); err == nil && r != nil {
+			repoID = r.RepoID
+		}
+	}
 	if e.db != nil {
 		e.findingLedger = NewFindingLedger(e.db, runID, repoID)
 		if err := e.findingLedger.InitError(); err != nil {
+			return err
+		}
+		var err error
+		e.workGenManager, err = NewWorkGenerationManager(e.db, runID, repoID, e.workDir, e.config, e.stepNames()...)
+		if err != nil {
 			return err
 		}
 	}
@@ -431,6 +462,12 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		return e.failRun(run, repo, err)
 	}
 
+	if e.workGenManager != nil {
+		if _, err := e.workGenManager.EnsureGeneration(ctx, run.HeadSHA); err != nil {
+			return e.failRun(run, repo, fmt.Errorf("initialize work generation: %w", err))
+		}
+	}
+
 	parkStart := time.Unix(*run.AwaitingAgentSince, 0)
 	duration := recoveredStepDuration(gate.stepResult)
 	completeRecoveredGate := func() error {
@@ -444,9 +481,25 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 			reviewedHead := gate.reviewedHeadSHA
 			run.ReviewApprovedHeadSHA = &reviewedHead
 			ClearUncertifiedPipelineRangeIfCertified(ctx, e.db, repo.ID, run.Branch, reviewedHead, workDir)
+			if e.workGenManager != nil {
+				if _, err := e.workGenManager.RecordPhaseResult(ctx, gate.step.Name(), types.PhaseResultStatusPassed, string(gate.step.Name()), "", "", nil); err != nil {
+					return fmt.Errorf("record recovered phase result %s: %w", gate.step.Name(), err)
+				}
+				if err := e.workGenManager.SealGeneration(ctx, gate.step.Name()); err != nil {
+					return fmt.Errorf("seal recovered generation: %w", err)
+				}
+			}
 			return nil
 		}
-		return e.db.CompleteStepWithStatus(gate.stepResult.ID, types.StepStatusCompleted, recoveredExitCode(gate.stepResult), duration, recoveredLogPath(gate.stepResult))
+		if err := e.db.CompleteStepWithStatus(gate.stepResult.ID, types.StepStatusCompleted, recoveredExitCode(gate.stepResult), duration, recoveredLogPath(gate.stepResult)); err != nil {
+			return err
+		}
+		if e.workGenManager != nil {
+			if _, err := e.workGenManager.RecordPhaseResult(ctx, gate.step.Name(), types.PhaseResultStatusPassed, string(gate.step.Name()), "", "", nil); err != nil {
+				return fmt.Errorf("record recovered phase result %s: %w", gate.step.Name(), err)
+			}
+		}
+		return nil
 	}
 	completeReconciledGate := func() error {
 		if err := completeRecoveredGate(); err != nil {
@@ -568,6 +621,11 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		if e.findingLedger != nil {
 			if err := e.findingLedger.ProcessExplicitDisposition(ctx, gate.step.Name(), gate.stepResult.ID, gate.round, types.ActionSkip, "step skipped by user", "user_skip"); err != nil {
 				return e.failRun(run, repo, fmt.Errorf("step %s finding ledger skip: %w", gate.step.Name(), err), ctx)
+			}
+		}
+		if e.workGenManager != nil {
+			if _, err := e.workGenManager.RecordPhaseResult(ctx, gate.step.Name(), types.PhaseResultStatusNotApplicable, string(gate.step.Name()), "", "", nil); err != nil {
+				return e.failRun(run, repo, fmt.Errorf("skip recovered step %s: %w", gate.step.Name(), err), ctx)
 			}
 		}
 		if err := e.db.CompleteStepWithStatus(gate.stepResult.ID, types.StepStatusSkipped, recoveredExitCode(gate.stepResult), duration, recoveredLogPath(gate.stepResult)); err != nil {
@@ -744,6 +802,11 @@ func (e *Executor) recoveredGate(runID string) (*recoveredGate, error) {
 }
 
 func (e *Executor) executeRecoveredRemainder(ctx context.Context, run *db.Run, repo *db.Repo, workDir, logDir string, start int, revalidating bool) error {
+	if e.workGenManager != nil {
+		if _, err := e.workGenManager.EnsureGeneration(ctx, run.HeadSHA); err != nil {
+			return e.failRun(run, repo, fmt.Errorf("initialize work generation: %w", err), ctx)
+		}
+	}
 	results, err := e.db.GetStepsByRun(run.ID)
 	if err != nil {
 		return e.failRun(run, repo, fmt.Errorf("get recovered steps: %w", err), ctx)
@@ -756,6 +819,9 @@ func (e *Executor) executeRecoveredRemainder(ctx context.Context, run *db.Run, r
 			return e.failRun(run, repo, fmt.Errorf("recovered step plan changed at %d", index), ctx)
 		}
 		if results[index].Status == types.StepStatusSkipped {
+			if e.workGenManager != nil {
+				_, _ = e.workGenManager.RecordPhaseResult(ctx, e.steps[index].Name(), types.PhaseResultStatusNotApplicable, string(e.steps[index].Name()), "", "", nil)
+			}
 			continue
 		}
 		state, stateErr := e.durableExecutionState(results[index].ID)
@@ -799,6 +865,9 @@ func (e *Executor) skipRecoveredRemainder(run *db.Run, repo *db.Repo, start int)
 		}
 		if err := e.db.CompleteStepWithStatus(results[index].ID, types.StepStatusSkipped, 0, 0, ""); err != nil {
 			return e.failRun(run, repo, fmt.Errorf("skip recovered step %s: %w", e.steps[index].Name(), err))
+		}
+		if e.workGenManager != nil {
+			_, _ = e.workGenManager.RecordPhaseResult(context.Background(), e.steps[index].Name(), types.PhaseResultStatusNotApplicable, string(e.steps[index].Name()), "", "", nil)
 		}
 		e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, e.steps[index].Name(), string(types.StepStatusSkipped), "", "", nil)
 	}
@@ -1038,6 +1107,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		MarkRunning:        markRunning,
 		OnPRMerged:         e.onPRMerged,
 		FindingLedger:      e.findingLedger,
+		WorkGenManager:     e.workGenManager,
 	}
 	if stepName == types.StepReview {
 		BindUncertifiedPipelineRange(sctx)
@@ -1062,9 +1132,15 @@ rounds:
 	for {
 		reviewStartingHeadSHA := run.HeadSHA
 		sctx.ReviewStartingHeadSHA = reviewStartingHeadSHA
+		var preSnapshot *PhaseSnapshot
+		if e.workGenManager != nil {
+			preSnapshot, _ = e.workGenManager.CheckPhasePreState(ctx, stepName)
+		}
+		isProtectedPathRefusal := false
 		outcome, err := step.Execute(sctx)
 		if refusal := ProtectedPathOutcome(err); refusal != nil {
 			outcome, err = refusal, nil
+			isProtectedPathRefusal = true
 		}
 		roundNum++
 		roundDuration := time.Since(phaseStart).Milliseconds()
@@ -1085,6 +1161,52 @@ rounds:
 			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", redactedErr, &durationMS)
 			return false, "", fmt.Errorf("step %s failed: %s", stepName, redactedErr)
 		}
+		if outcome == nil {
+			outcome = &StepOutcome{}
+		}
+
+		if e.workGenManager != nil && preSnapshot != nil && !isProtectedPathRefusal {
+			verdict, vErr := e.workGenManager.CheckPhasePostState(ctx, stepName, sctx.Fixing, preSnapshot)
+			if vErr != nil {
+				durationMS := executionMS + roundDuration
+				redactedErr := safeurl.RedactText(vErr.Error())
+				fmt.Fprintf(logFile, "\nerror: %s\n", redactedErr)
+				touchLogActivity("error: "+redactedErr, true)
+				if dbErr := e.db.FailStep(sr.ID, redactedErr, durationMS); dbErr != nil {
+					slog.Warn("failed to mark step as failed in db", "step", stepName, "error", dbErr)
+				}
+				e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", redactedErr, &durationMS)
+				return false, "", fmt.Errorf("step %s check post-state: %w", stepName, vErr)
+			}
+			if !verdict.Allowed {
+				unauthOutcome := UnauthorizedWriteOutcome(stepName, verdict.UnauthorizedPaths, verdict.Reason)
+				outcome.NeedsApproval = true
+				outcome.Findings = mergeFindingsJSON(outcome.Findings, unauthOutcome.Findings)
+			} else if len(verdict.ModifiedPaths) > 0 {
+				currentHead, _ := git.HeadSHA(ctx, workDir)
+				if currentHead == "" {
+					currentHead = run.HeadSHA
+				}
+				if stepName == types.StepDocument || stepName == types.StepLint {
+					hasSelectedMutation := false
+					for _, p := range verdict.ModifiedPaths {
+						if e.workGenManager.MatchesSelectedInputs(p) {
+							hasSelectedMutation = true
+							break
+						}
+					}
+					if hasSelectedMutation {
+						_, _ = e.workGenManager.HandleMutation(ctx, string(stepName)+"_selected_input_mutation", stepName, currentHead, verdict.ModifiedPaths)
+						outcome.RestartFrom = types.StepReview
+					} else {
+						_, _ = e.workGenManager.HandleMutation(ctx, string(stepName)+"_narrative_mutation", stepName, currentHead, verdict.ModifiedPaths)
+					}
+				} else if sctx.Fixing || (preSnapshot != nil && currentHead != preSnapshot.HeadSHA && (stepName == types.StepCI || stepName == types.StepReview || stepName == types.StepTest)) {
+					_, _ = e.workGenManager.HandleMutation(ctx, fmt.Sprintf("%s_fix_round_%d", stepName, roundNum), stepName, currentHead, verdict.ModifiedPaths)
+				}
+			}
+		}
+
 		restartFrom = outcome.RestartFrom
 
 		if stepName == types.StepReview {
@@ -1334,6 +1456,9 @@ rounds:
 						return false, "", fmt.Errorf("step %s finding ledger skip: %w", stepName, err)
 					}
 				}
+				if e.workGenManager != nil {
+					_, _ = e.workGenManager.RecordPhaseResult(ctx, stepName, types.PhaseResultStatusNotApplicable, string(stepName), "", "", nil)
+				}
 				if err := e.db.CompleteStepWithStatus(sr.ID, types.StepStatusSkipped, finalExitCode, executionMS, logPath); err != nil {
 					return false, "", fmt.Errorf("complete step %s (skip): %w", stepName, err)
 				}
@@ -1437,6 +1562,23 @@ done:
 	status := types.StepStatusCompleted
 	if stepSkipped {
 		status = types.StepStatusSkipped
+	}
+
+	if e.workGenManager != nil {
+		switch status {
+		case types.StepStatusCompleted:
+			evidenceID := ""
+			outputDigest := ""
+			if sctx.EvidenceDir != "" {
+				evidenceID = sctx.EvidenceDir
+			}
+			_, _ = e.workGenManager.RecordPhaseResult(ctx, stepName, types.PhaseResultStatusPassed, string(stepName), evidenceID, outputDigest, nil)
+			if stepName == types.StepReview {
+				_ = e.workGenManager.SealGeneration(ctx, stepName)
+			}
+		case types.StepStatusSkipped:
+			_, _ = e.workGenManager.RecordPhaseResult(ctx, stepName, types.PhaseResultStatusNotApplicable, string(stepName), "", "", nil)
+		}
 	}
 	// A review round's captured head becomes authority only when the review
 	// actually completes. Parked outcomes stay in the loop above, failures
@@ -1789,6 +1931,15 @@ func (e *Executor) completeRun(run *db.Run, repo *db.Repo) error {
 		}
 	}
 	verifiedHead, verified := e.reconcileTerminalRunHead(run)
+	headSHA := run.HeadSHA
+	if verified {
+		headSHA = verifiedHead
+	}
+	if e.workGenManager != nil {
+		if _, err := e.workGenManager.AssertAcceptance(context.Background(), headSHA, true); err != nil {
+			return err
+		}
+	}
 	var err error
 	if verified {
 		err = e.db.UpdateRunStatusWithVerifiedHead(run.ID, types.RunCompleted, verifiedHead)

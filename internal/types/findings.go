@@ -144,6 +144,7 @@ var stepOwnedFindingIDs = []string{
 	FindingIDTestAgentTimeout,
 	FindingIDTestAgentUnvalidatedWork,
 	FindingIDProtectedPathRefusal,
+	FindingIDUnauthorizedWriteRefusal,
 	FindingIDCIFixAgentTimeout,
 	FindingIDTestAgentNewTestFile,
 }

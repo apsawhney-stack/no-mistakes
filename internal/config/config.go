@@ -344,6 +344,23 @@ type RepoConfig struct {
 	// registered pending or failing check. No inference from workflow files,
 	// prior history, branch names, or grace-period expiry.
 	NoCI bool `yaml:"no_ci"`
+	// ValidationPlan defines the trusted rules governing candidate execution:
+	// selected executable inputs, required phases, deterministic commands,
+	// dependency edges, and phase-scoped write sets.
+	// It is trusted-only (see EffectiveRepoConfig).
+	ValidationPlan *ValidationPlanRaw `yaml:"validation_plan"`
+}
+
+// ValidationPlanRaw is the YAML representation of the trusted validation plan.
+type ValidationPlanRaw struct {
+	Version             string              `yaml:"version"`
+	PlanID              string              `yaml:"plan_id"`
+	SelectedInputs      []string            `yaml:"selected_inputs"`
+	RequiredPhases      []string            `yaml:"required_phases"`
+	Commands            map[string]string   `yaml:"commands"`
+	DependencyEdges     map[string][]string `yaml:"dependency_edges"`
+	PhaseWriteSets      map[string][]string `yaml:"phase_write_sets"`
+	ProtectedExclusions []string            `yaml:"protected_exclusions"`
 }
 
 // DocumentRaw is the YAML representation of document-step settings.
@@ -700,6 +717,8 @@ type Config struct {
 	NoCI bool
 	// Providers holds the resolved provider-specific settings.
 	Providers Providers
+	// ValidationPlan defines the trusted rules governing candidate execution.
+	ValidationPlan types.ValidationPlan
 }
 
 // ProvidersRaw is the YAML representation of provider-specific settings,
@@ -2605,6 +2624,12 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		}
 		effective.PR.Template = trusted.PR.Template
 		effective.PR.PublishIntent = trusted.PR.PublishIntent
+		// validation_plan defines what validating candidate execution means,
+		// selected executable inputs, and write boundaries; so it is trusted-only
+		// regardless of allow_repo_commands: candidate-controlled bytes cannot
+		// weaken independently established requirements or authorize their own
+		// protected writes.
+		effective.ValidationPlan = cloneValidationPlan(trusted.ValidationPlan)
 	} else {
 		effective.Document = DocumentRaw{}
 		effective.ProtectedPaths = nil
@@ -2617,6 +2642,7 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		effective.Test.Evidence.Branch = nil
 		effective.Test.Instructions = ""
 		effective.Test.AllowApproveOverFailure = ""
+		effective.ValidationPlan = nil
 		if !allowRepoCommands {
 			effective.PR.BaseBranch = ""
 		}
@@ -3098,6 +3124,12 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		// trusted-only (EffectiveRepoConfig sourced it from the trusted copy).
 		DisableProjectSettings: repo.DisableProjectSettings,
 		NoCI:                   repo.NoCI,
+	}
+
+	if repo.ValidationPlan != nil {
+		cfg.ValidationPlan = repo.ValidationPlan.ToValidationPlan(cfg)
+	} else {
+		cfg.ValidationPlan = DefaultConservativeValidationPlan(cfg)
 	}
 
 	if repo.Agent != "" {

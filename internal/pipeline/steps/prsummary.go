@@ -61,6 +61,12 @@ type pipelineAttestation struct {
 	// has not opted in. Additive: older attestations without the field are
 	// read as not opted in.
 	AllowTestCommandOverride string `json:"allow_test_command_override,omitempty"`
+	WorkGenerationID         string `json:"work_generation_id,omitempty"`
+	WorkGenerationDigest     string `json:"work_generation_digest,omitempty"`
+	WorkPlanID               string `json:"work_plan_id,omitempty"`
+	WorkPlanDigest           string `json:"work_plan_digest,omitempty"`
+	WorkEnvelopeDigest       string `json:"work_envelope_digest,omitempty"`
+	WorkAttestationDigest    string `json:"work_attestation_digest,omitempty"`
 }
 
 type pipelineAttestationStep struct {
@@ -122,6 +128,12 @@ func BuildPipelineSummaryFor(steps []*db.StepResult, rounds map[string][]*db.Ste
 
 type pipelineAttestationPolicy struct {
 	AllowTestCommandOverride string
+	WorkGenerationID         string
+	WorkGenerationDigest     string
+	WorkPlanID               string
+	WorkPlanDigest           string
+	WorkEnvelopeDigest       string
+	WorkAttestationDigest    string
 }
 
 func buildPipelineSummaryFor(steps []*db.StepResult, rounds map[string][]*db.StepRound, headSHA string, provider scm.Provider, policy pipelineAttestationPolicy) (string, string) {
@@ -191,8 +203,14 @@ func buildPipelineAttestationWithPolicy(steps []*db.StepResult, rounds map[strin
 
 func newPipelineAttestation(steps []*db.StepResult, rounds map[string][]*db.StepRound, headSHA string, policy pipelineAttestationPolicy) pipelineAttestation {
 	attestation := pipelineAttestation{
-		HeadSHA: headSHA,
-		Steps:   make([]pipelineAttestationStep, 0, len(steps)),
+		HeadSHA:               headSHA,
+		Steps:                 make([]pipelineAttestationStep, 0, len(steps)),
+		WorkGenerationID:      policy.WorkGenerationID,
+		WorkGenerationDigest:  policy.WorkGenerationDigest,
+		WorkPlanID:            policy.WorkPlanID,
+		WorkPlanDigest:        policy.WorkPlanDigest,
+		WorkEnvelopeDigest:    policy.WorkEnvelopeDigest,
+		WorkAttestationDigest: policy.WorkAttestationDigest,
 	}
 	for _, sr := range steps {
 		if sr == nil {
@@ -321,6 +339,14 @@ func rebindPipelineAttestationWithSteps(body, newHeadSHA string, steps []*db.Ste
 		}
 	}
 	rebound := newPipelineAttestation(steps, nil, newHeadSHA, policy)
+	if rebound.WorkGenerationID == "" {
+		rebound.WorkGenerationID = attestation.WorkGenerationID
+		rebound.WorkGenerationDigest = attestation.WorkGenerationDigest
+		rebound.WorkPlanID = attestation.WorkPlanID
+		rebound.WorkPlanDigest = attestation.WorkPlanDigest
+		rebound.WorkEnvelopeDigest = attestation.WorkEnvelopeDigest
+		rebound.WorkAttestationDigest = attestation.WorkAttestationDigest
+	}
 	// Step statuses may be republished for a head the pipeline did not
 	// re-validate. Live validation is a factual claim about one commit's
 	// behavior, so it is derived only from current step findings and never

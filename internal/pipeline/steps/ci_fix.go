@@ -834,6 +834,18 @@ func attestationPolicyFrom(sctx *pipeline.StepContext) pipelineAttestationPolicy
 	if sctx != nil && sctx.Config != nil {
 		policy.AllowTestCommandOverride = strings.TrimSpace(sctx.Config.Test.AllowApproveOverFailure)
 	}
+	if sctx != nil && sctx.WorkGenManager != nil {
+		if curGen, err := sctx.WorkGenManager.CurrentGeneration(context.Background()); err == nil && curGen != nil {
+			policy.WorkGenerationID = curGen.ID
+			policy.WorkGenerationDigest = curGen.GenerationDigest
+			policy.WorkPlanID = curGen.PlanID
+			policy.WorkPlanDigest = curGen.PlanDigest
+		}
+		if att, err := sctx.WorkGenManager.Attestation(context.Background()); err == nil && att != nil {
+			policy.WorkEnvelopeDigest = att.FinalEnvelopeDigest
+			policy.WorkAttestationDigest = att.AttestationDigest
+		}
+	}
 	return policy
 }
 

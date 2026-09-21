@@ -1474,6 +1474,9 @@ func runToInfo(d *db.DB, r *db.Run, steps []*db.StepResult) *ipc.RunInfo {
 	if summary, err := d.GetFindingLedgerSummary(r.ID); err == nil && summary != nil && summary.TotalEntries > 0 {
 		info.FindingLedger = summary
 	}
+	if genSummary, err := d.GetWorkGenerationSummary(r.ID); err == nil && genSummary != nil {
+		info.WorkGeneration = genSummary
+	}
 	return info
 }
 

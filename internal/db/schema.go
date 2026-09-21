@@ -233,6 +233,8 @@ CREATE TABLE IF NOT EXISTS finding_ledger_entries (
     closure_evidence            TEXT,
     closure_reason              TEXT,
     disposition_provenance      TEXT,
+    generation_id               TEXT,
+    closure_generation_id       TEXT,
     last_observed_round         INTEGER NOT NULL,
     last_observed_file          TEXT NOT NULL DEFAULT '',
     last_observed_line          INTEGER NOT NULL DEFAULT 0,
@@ -261,6 +263,7 @@ CREATE TABLE IF NOT EXISTS finding_ledger_events (
     evidence         TEXT,
     reason           TEXT,
     provenance       TEXT,
+    generation_id    TEXT,
     created_at       INTEGER NOT NULL
 );
 
@@ -269,6 +272,82 @@ CREATE INDEX IF NOT EXISTS idx_finding_ledger_events_entry
 
 CREATE INDEX IF NOT EXISTS idx_finding_ledger_events_run
     ON finding_ledger_events (run_id, created_at);
+
+CREATE TABLE IF NOT EXISTS work_generations (
+    id                      TEXT PRIMARY KEY,
+    run_id                  TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    repo_id                 TEXT NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    ordinal                 INTEGER NOT NULL,
+    parent_generation_id    TEXT REFERENCES work_generations(id),
+    cause                   TEXT NOT NULL,
+    generation_digest       TEXT NOT NULL,
+    plan_id                 TEXT NOT NULL,
+    plan_digest             TEXT NOT NULL,
+    plan_yaml               TEXT NOT NULL DEFAULT '',
+    git_head_sha            TEXT NOT NULL,
+    git_tree_sha            TEXT NOT NULL,
+    input_manifest_json     TEXT NOT NULL,
+    input_manifest_digest   TEXT NOT NULL,
+    command_identities_json TEXT NOT NULL DEFAULT '{}',
+    config_digest           TEXT NOT NULL DEFAULT '',
+    toolchain_digest        TEXT NOT NULL DEFAULT '',
+    dependency_lock_digest  TEXT NOT NULL DEFAULT '',
+    phase                   TEXT NOT NULL,
+    status                  TEXT NOT NULL DEFAULT 'active',
+    created_at              INTEGER NOT NULL,
+    UNIQUE(run_id, ordinal)
+);
+
+CREATE INDEX IF NOT EXISTS idx_work_generations_run_ordinal
+    ON work_generations (run_id, ordinal);
+
+CREATE TABLE IF NOT EXISTS work_phase_results (
+    id                         TEXT PRIMARY KEY,
+    run_id                     TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    generation_id              TEXT NOT NULL REFERENCES work_generations(id) ON DELETE CASCADE,
+    plan_id                    TEXT NOT NULL,
+    phase                      TEXT NOT NULL,
+    status                     TEXT NOT NULL,
+    applicable                 INTEGER NOT NULL DEFAULT 1,
+    command_identity           TEXT NOT NULL DEFAULT '',
+    dependency_identities_json TEXT NOT NULL DEFAULT '[]',
+    evidence_id                TEXT NOT NULL DEFAULT '',
+    output_digest              TEXT NOT NULL DEFAULT '',
+    invalidation_reason        TEXT NOT NULL DEFAULT '',
+    created_at                 INTEGER NOT NULL,
+    invalidated_at             INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_work_phase_results_run_gen
+    ON work_phase_results (run_id, generation_id, phase);
+
+CREATE TABLE IF NOT EXISTS work_attestations (
+    id                        TEXT PRIMARY KEY,
+    run_id                    TEXT NOT NULL UNIQUE REFERENCES runs(id) ON DELETE CASCADE,
+    protocol_version          TEXT NOT NULL DEFAULT 'v1',
+    generation_id             TEXT NOT NULL REFERENCES work_generations(id) ON DELETE CASCADE,
+    generation_digest         TEXT NOT NULL,
+    generation_ordinal        INTEGER NOT NULL,
+    plan_id                   TEXT NOT NULL,
+    plan_digest               TEXT NOT NULL,
+    final_head_sha            TEXT NOT NULL,
+    final_tree_sha            TEXT NOT NULL,
+    final_envelope_digest     TEXT NOT NULL,
+    phase_results_json        TEXT NOT NULL,
+    evidence_identities_json  TEXT NOT NULL DEFAULT '{}',
+    ledger_summary_json       TEXT NOT NULL DEFAULT '{}',
+    invalidation_history_json TEXT NOT NULL DEFAULT '[]',
+    ci_head_sha               TEXT NOT NULL,
+    ci_check_identity         TEXT NOT NULL DEFAULT '',
+    attestation_digest        TEXT NOT NULL,
+    created_at                INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS work_generation_migrations (
+    run_id           TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+    protocol_version TEXT NOT NULL,
+    imported_at      INTEGER NOT NULL
+);
 `
 
 // migrationStatements hold additive schema changes applied to databases that
@@ -472,6 +551,80 @@ var migrationStatements = []string{
 	// certifying an incomplete import (see MigrateLegacyFindingLedgerForRun).
 	// The marker row is written in the same transaction as the import.
 	`CREATE TABLE IF NOT EXISTS finding_ledger_migrations (
+		run_id           TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+		protocol_version TEXT NOT NULL,
+		imported_at      INTEGER NOT NULL
+	)`,
+	`ALTER TABLE runs ADD COLUMN current_generation_id TEXT`,
+	`ALTER TABLE runs ADD COLUMN validation_plan_digest TEXT`,
+	`ALTER TABLE runs ADD COLUMN work_attestation_id TEXT`,
+	`ALTER TABLE finding_ledger_entries ADD COLUMN generation_id TEXT`,
+	`ALTER TABLE finding_ledger_entries ADD COLUMN closure_generation_id TEXT`,
+	`ALTER TABLE finding_ledger_events ADD COLUMN generation_id TEXT`,
+	`CREATE TABLE IF NOT EXISTS work_generations (
+		id                      TEXT PRIMARY KEY,
+		run_id                  TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+		repo_id                 TEXT NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+		ordinal                 INTEGER NOT NULL,
+		parent_generation_id    TEXT REFERENCES work_generations(id),
+		cause                   TEXT NOT NULL,
+		generation_digest       TEXT NOT NULL,
+		plan_id                 TEXT NOT NULL,
+		plan_digest             TEXT NOT NULL,
+		plan_yaml               TEXT NOT NULL DEFAULT '',
+		git_head_sha            TEXT NOT NULL,
+		git_tree_sha            TEXT NOT NULL,
+		input_manifest_json     TEXT NOT NULL,
+		input_manifest_digest   TEXT NOT NULL,
+		command_identities_json TEXT NOT NULL DEFAULT '{}',
+		config_digest           TEXT NOT NULL DEFAULT '',
+		toolchain_digest        TEXT NOT NULL DEFAULT '',
+		dependency_lock_digest  TEXT NOT NULL DEFAULT '',
+		phase                   TEXT NOT NULL,
+		status                  TEXT NOT NULL DEFAULT 'active',
+		created_at              INTEGER NOT NULL,
+		UNIQUE(run_id, ordinal)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_work_generations_run_ordinal ON work_generations (run_id, ordinal)`,
+	`CREATE TABLE IF NOT EXISTS work_phase_results (
+		id                         TEXT PRIMARY KEY,
+		run_id                     TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+		generation_id              TEXT NOT NULL REFERENCES work_generations(id) ON DELETE CASCADE,
+		plan_id                    TEXT NOT NULL,
+		phase                      TEXT NOT NULL,
+		status                     TEXT NOT NULL,
+		applicable                 INTEGER NOT NULL DEFAULT 1,
+		command_identity           TEXT NOT NULL DEFAULT '',
+		dependency_identities_json TEXT NOT NULL DEFAULT '[]',
+		evidence_id                TEXT NOT NULL DEFAULT '',
+		output_digest              TEXT NOT NULL DEFAULT '',
+		invalidation_reason        TEXT NOT NULL DEFAULT '',
+		created_at                 INTEGER NOT NULL,
+		invalidated_at             INTEGER
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_work_phase_results_run_gen ON work_phase_results (run_id, generation_id, phase)`,
+	`CREATE TABLE IF NOT EXISTS work_attestations (
+		id                        TEXT PRIMARY KEY,
+		run_id                    TEXT NOT NULL UNIQUE REFERENCES runs(id) ON DELETE CASCADE,
+		protocol_version          TEXT NOT NULL DEFAULT 'v1',
+		generation_id             TEXT NOT NULL REFERENCES work_generations(id) ON DELETE CASCADE,
+		generation_digest         TEXT NOT NULL,
+		generation_ordinal        INTEGER NOT NULL,
+		plan_id                   TEXT NOT NULL,
+		plan_digest               TEXT NOT NULL,
+		final_head_sha            TEXT NOT NULL,
+		final_tree_sha            TEXT NOT NULL,
+		final_envelope_digest     TEXT NOT NULL,
+		phase_results_json        TEXT NOT NULL,
+		evidence_identities_json  TEXT NOT NULL DEFAULT '{}',
+		ledger_summary_json       TEXT NOT NULL DEFAULT '{}',
+		invalidation_history_json TEXT NOT NULL DEFAULT '[]',
+		ci_head_sha               TEXT NOT NULL,
+		ci_check_identity         TEXT NOT NULL DEFAULT '',
+		attestation_digest        TEXT NOT NULL,
+		created_at                INTEGER NOT NULL
+	)`,
+	`CREATE TABLE IF NOT EXISTS work_generation_migrations (
 		run_id           TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
 		protocol_version TEXT NOT NULL,
 		imported_at      INTEGER NOT NULL

@@ -32,16 +32,16 @@ func (d *DB) InsertFindingLedgerEntry(entry *types.FindingLedgerEntry) error {
 			category, check_name, check_id, decision_id, source, user_instructions,
 			review_scope, original_finding_json, current_finding_json, status,
 			is_blocking, selected_in_round, correcting_commit_sha, fix_session_id, closed_in_round,
-			closure_evidence, closure_reason, disposition_provenance,
+			closure_evidence, closure_reason, disposition_provenance, generation_id, closure_generation_id,
 			last_observed_round, last_observed_file, last_observed_line,
 			created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		entry.ID, entry.RunID, entry.RepoID, string(entry.StepName), entry.FirstSeenRound, entry.FirstSeenStepResultID,
 		entry.ReportedID, entry.Fingerprint, entry.Severity, entry.Action, entry.File, entry.Line, entry.Description,
 		entry.Category, entry.Check, entry.CheckID, entry.DecisionID, entry.Source, entry.UserInstructions,
 		entry.ReviewScope, entry.OriginalFindingJSON, entry.CurrentFindingJSON, entry.Status,
 		isBlockingInt, entry.SelectedInRound, entry.CorrectingCommitSHA, entry.FixSessionID, entry.ClosedInRound,
-		entry.ClosureEvidence, entry.ClosureReason, entry.DispositionProvenance,
+		entry.ClosureEvidence, entry.ClosureReason, entry.DispositionProvenance, entry.GenerationID, entry.ClosureGenerationID,
 		entry.LastObservedRound, entry.LastObservedFile, entry.LastObservedLine,
 		entry.CreatedAt, entry.UpdatedAt,
 	)
@@ -107,11 +107,11 @@ func (d *DB) RecordFindingLedgerEvent(event *types.FindingLedgerEvent) error {
 		`INSERT INTO finding_ledger_events (
 			id, entry_id, run_id, step_name, round, step_result_id,
 			event_type, state_before, state_after, commit_sha, session_id,
-			evidence, reason, provenance, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			evidence, reason, provenance, generation_id, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		event.ID, event.EntryID, event.RunID, string(event.StepName), event.Round, event.StepResultID,
 		event.EventType, event.StateBefore, event.StateAfter, event.CommitSHA, event.SessionID,
-		event.Evidence, event.Reason, event.Provenance, event.CreatedAt,
+		event.Evidence, event.Reason, event.Provenance, event.GenerationID, event.CreatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("record finding ledger event: %w", err)
@@ -125,8 +125,9 @@ const ledgerEntrySelectCols = `id, run_id, repo_id, step_name, first_seen_round,
 	review_scope, original_finding_json, current_finding_json, status,
 	is_blocking, COALESCE(selected_in_round, 0), COALESCE(correcting_commit_sha, ''),
 	COALESCE(fix_session_id, ''), COALESCE(closed_in_round, 0), COALESCE(closure_evidence, ''),
-	COALESCE(closure_reason, ''), COALESCE(disposition_provenance, ''), last_observed_round,
-	last_observed_file, last_observed_line, created_at, updated_at`
+	COALESCE(closure_reason, ''), COALESCE(disposition_provenance, ''),
+	COALESCE(generation_id, ''), COALESCE(closure_generation_id, ''),
+	last_observed_round, last_observed_file, last_observed_line, created_at, updated_at`
 
 func scanLedgerEntry(scan func(...interface{}) error) (*types.FindingLedgerEntry, error) {
 	e := &types.FindingLedgerEntry{}
@@ -139,7 +140,8 @@ func scanLedgerEntry(scan func(...interface{}) error) (*types.FindingLedgerEntry
 		&e.ReviewScope, &e.OriginalFindingJSON, &e.CurrentFindingJSON, &e.Status,
 		&isBlockingInt, &e.SelectedInRound, &e.CorrectingCommitSHA, &e.FixSessionID,
 		&e.ClosedInRound, &e.ClosureEvidence, &e.ClosureReason,
-		&e.DispositionProvenance, &e.LastObservedRound, &e.LastObservedFile,
+		&e.DispositionProvenance, &e.GenerationID, &e.ClosureGenerationID,
+		&e.LastObservedRound, &e.LastObservedFile,
 		&e.LastObservedLine, &e.CreatedAt, &e.UpdatedAt,
 	); err != nil {
 		return nil, err
@@ -215,7 +217,7 @@ func (d *DB) GetFindingLedgerEvents(entryID string) ([]*types.FindingLedgerEvent
 		`SELECT id, entry_id, run_id, step_name, round, COALESCE(step_result_id, ''),
 		        event_type, state_before, state_after, COALESCE(commit_sha, ''),
 		        COALESCE(session_id, ''), COALESCE(evidence, ''), COALESCE(reason, ''),
-		        COALESCE(provenance, ''), created_at
+		        COALESCE(provenance, ''), COALESCE(generation_id, ''), created_at
 		   FROM finding_ledger_events
 		  WHERE entry_id = ?
 		  ORDER BY created_at ASC, id ASC`,
@@ -233,7 +235,7 @@ func (d *DB) GetFindingLedgerEvents(entryID string) ([]*types.FindingLedgerEvent
 		if err := rows.Scan(
 			&ev.ID, &ev.EntryID, &ev.RunID, &stepName, &ev.Round, &ev.StepResultID,
 			&ev.EventType, &ev.StateBefore, &ev.StateAfter, &ev.CommitSHA, &ev.SessionID,
-			&ev.Evidence, &ev.Reason, &ev.Provenance, &ev.CreatedAt,
+			&ev.Evidence, &ev.Reason, &ev.Provenance, &ev.GenerationID, &ev.CreatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan finding ledger event: %w", err)
 		}
@@ -694,6 +696,7 @@ func updateLedgerEntryExec(exec ledgerExec, entry *types.FindingLedgerEntry) err
 			current_finding_json = ?, status = ?, is_blocking = ?,
 			selected_in_round = ?, correcting_commit_sha = ?, fix_session_id = ?, closed_in_round = ?,
 			closure_evidence = ?, closure_reason = ?, disposition_provenance = ?,
+			generation_id = ?, closure_generation_id = ?,
 			last_observed_round = ?, last_observed_file = ?, last_observed_line = ?,
 			updated_at = ?
 		WHERE id = ?`,
@@ -703,6 +706,7 @@ func updateLedgerEntryExec(exec ledgerExec, entry *types.FindingLedgerEntry) err
 		entry.CurrentFindingJSON, entry.Status, isBlockingInt,
 		entry.SelectedInRound, entry.CorrectingCommitSHA, entry.FixSessionID, entry.ClosedInRound,
 		entry.ClosureEvidence, entry.ClosureReason, entry.DispositionProvenance,
+		entry.GenerationID, entry.ClosureGenerationID,
 		entry.LastObservedRound, entry.LastObservedFile, entry.LastObservedLine,
 		entry.UpdatedAt, entry.ID,
 	)
@@ -743,16 +747,16 @@ func insertLedgerEntryTx(tx *sql.Tx, entry *types.FindingLedgerEntry) error {
 			category, check_name, check_id, decision_id, source, user_instructions,
 			review_scope, original_finding_json, current_finding_json, status,
 			is_blocking, selected_in_round, correcting_commit_sha, fix_session_id, closed_in_round,
-			closure_evidence, closure_reason, disposition_provenance,
+			closure_evidence, closure_reason, disposition_provenance, generation_id, closure_generation_id,
 			last_observed_round, last_observed_file, last_observed_line,
 			created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		entry.ID, entry.RunID, entry.RepoID, string(entry.StepName), entry.FirstSeenRound, entry.FirstSeenStepResultID,
 		entry.ReportedID, entry.Fingerprint, entry.Severity, entry.Action, entry.File, entry.Line, entry.Description,
 		entry.Category, entry.Check, entry.CheckID, entry.DecisionID, entry.Source, entry.UserInstructions,
 		entry.ReviewScope, entry.OriginalFindingJSON, entry.CurrentFindingJSON, entry.Status,
 		isBlockingInt, entry.SelectedInRound, entry.CorrectingCommitSHA, entry.FixSessionID, entry.ClosedInRound,
-		entry.ClosureEvidence, entry.ClosureReason, entry.DispositionProvenance,
+		entry.ClosureEvidence, entry.ClosureReason, entry.DispositionProvenance, entry.GenerationID, entry.ClosureGenerationID,
 		entry.LastObservedRound, entry.LastObservedFile, entry.LastObservedLine,
 		entry.CreatedAt, entry.UpdatedAt,
 	)
@@ -773,11 +777,11 @@ func insertLedgerEventTx(tx *sql.Tx, event *types.FindingLedgerEvent) error {
 		`INSERT INTO finding_ledger_events (
 			id, entry_id, run_id, step_name, round, step_result_id,
 			event_type, state_before, state_after, commit_sha, session_id,
-			evidence, reason, provenance, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			evidence, reason, provenance, generation_id, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		event.ID, event.EntryID, event.RunID, string(event.StepName), event.Round, event.StepResultID,
 		event.EventType, event.StateBefore, event.StateAfter, event.CommitSHA, event.SessionID,
-		event.Evidence, event.Reason, event.Provenance, event.CreatedAt,
+		event.Evidence, event.Reason, event.Provenance, event.GenerationID, event.CreatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("record finding ledger event: %w", err)

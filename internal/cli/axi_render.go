@@ -133,6 +133,7 @@ type runView struct {
 	CIOverrideReason   string
 	TestOverrideReason string
 	FindingLedger      *types.FindingLedgerSummary
+	WorkGeneration     *types.WorkGenerationSummary
 }
 
 func runViewFromIPC(r *ipc.RunInfo) runView {
@@ -148,6 +149,7 @@ func runViewFromIPC(r *ipc.RunInfo) runView {
 		TestOverrideReason: r.TestOverrideReason,
 		PiProfile:          r.PiProfile,
 		FindingLedger:      r.FindingLedger,
+		WorkGeneration:     r.WorkGeneration,
 	}
 	if r.PRURL != nil {
 		rv.PRURL = *r.PRURL
@@ -239,6 +241,9 @@ func runViewFromDB(r *db.Run, steps []*db.StepResult, database *db.DB) runView {
 	if database != nil {
 		if summary, err := database.GetFindingLedgerSummary(r.ID); err == nil && summary != nil && summary.TotalEntries > 0 {
 			rv.FindingLedger = summary
+		}
+		if genSummary, err := database.GetWorkGenerationSummary(r.ID); err == nil && genSummary != nil {
+			rv.WorkGeneration = genSummary
 		}
 	}
 	return rv
@@ -514,6 +519,16 @@ func runObjectFieldWithKey(key string, rv runView) toon.Field {
 			toon.Field{Key: "pending", Value: rv.FindingLedger.PendingCount},
 			toon.Field{Key: "reconcile", Value: rv.FindingLedger.ReconcileCount},
 			toon.Field{Key: "closed", Value: rv.FindingLedger.ClosedCount},
+		)})
+	}
+	if rv.WorkGeneration != nil {
+		fields = append(fields, toon.Field{Key: "work_generation", Value: toon.NewObject(
+			toon.Field{Key: "version", Value: rv.WorkGeneration.ProtocolVersion},
+			toon.Field{Key: "current_generation", Value: rv.WorkGeneration.CurrentGenerationOrdinal},
+			toon.Field{Key: "generation_digest", Value: rv.WorkGeneration.CurrentGenerationDigest},
+			toon.Field{Key: "plan_id", Value: rv.WorkGeneration.PlanID},
+			toon.Field{Key: "write_set_verdict", Value: rv.WorkGeneration.WriteSetVerdict},
+			toon.Field{Key: "has_attestation", Value: rv.WorkGeneration.AttestationID != ""},
 		)})
 	}
 
