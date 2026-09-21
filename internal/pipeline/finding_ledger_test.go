@@ -750,13 +750,11 @@ func TestFindingLedger_StepOwnedFindingsStayOutOfTheLedger(t *testing.T) {
 	if parsed.Ledger.Unresolved() == 0 {
 		t.Fatal("an unresolved analyzer finding must stay visible")
 	}
-	// An open BLOCKING entry parks through the ordinary blocking-finding path,
-	// not through the ledger's pending/reconciliation clause.
 	if !hasBlockingFindingsJSON(effective) {
 		t.Fatal("an open blocking analyzer finding must still park its gate")
 	}
-	if ledgerRequiresDisposition(effective) {
-		t.Fatal("ledgerRequiresDisposition must not be the path that parks an open blocking entry")
+	if !ledgerRequiresDisposition(effective) {
+		t.Fatal("an open blocking ledger entry must require a gate disposition")
 	}
 }
 
@@ -1434,14 +1432,12 @@ func TestFindingLedger_CISelectedRepairClosesVerifiedNotSuperseded(t *testing.T)
 	}
 }
 
-// TestLedgerRequiresDispositionParksOnlyPendingOrReconciliation pins the gate
+// TestLedgerRequiresDispositionParksForTerminalRefusals pins the gate
 // rule the accepted Increment E contract requires: the ledger clause exists to
 // stop a run dead-ending at terminal acceptance, and terminal acceptance refuses
-// exactly pending-verification and reconciliation-required entries. A merely
-// open entry keeps the semantics the product already had - a blocking one parks
-// through hasBlockingFindingsJSON / hasAskUserFindingsJSON, and an explicitly
-// non-blocking informational no-op does not park at all.
-func TestLedgerRequiresDispositionParksOnlyPendingOrReconciliation(t *testing.T) {
+// pending-verification, reconciliation-required, and open blocking entries. An
+// explicitly non-blocking informational no-op does not park at all.
+func TestLedgerRequiresDispositionParksForTerminalRefusals(t *testing.T) {
 	payload := func(status string, blocking types.Finding) string {
 		summary := &types.FindingLedgerSummary{
 			ProtocolVersion: types.FindingLedgerProtocolVersion,
@@ -1475,6 +1471,7 @@ func TestLedgerRequiresDispositionParksOnlyPendingOrReconciliation(t *testing.T)
 
 	infoNoOp := types.Finding{ID: "info-1", Severity: "info", Action: types.ActionNoOp, File: "a.go", Description: "note"}
 	errorAutoFix := types.Finding{ID: "err-1", Severity: "error", Action: types.ActionAutoFix, File: "a.go", Description: "defect"}
+	infoAutoFix := types.Finding{ID: "fix-1", Severity: "info", Action: types.ActionAutoFix, File: "a.go", Description: "repairable note"}
 	infoAskUser := types.Finding{ID: "ask-1", Severity: "info", Action: types.ActionAskUser, File: "a.go", Description: "decide"}
 
 	for _, tc := range []struct {
@@ -1486,8 +1483,9 @@ func TestLedgerRequiresDispositionParksOnlyPendingOrReconciliation(t *testing.T)
 		wantAskUser  bool
 	}{
 		{"open info no-op keeps product semantics", types.FindingLedgerStatusOpen, infoNoOp, false, false, false},
-		{"open error parks via the blocking path", types.FindingLedgerStatusOpen, errorAutoFix, false, true, false},
-		{"open ask-user parks via the ask-user path", types.FindingLedgerStatusOpen, infoAskUser, false, false, true},
+		{"open error parks via ledger and blocking paths", types.FindingLedgerStatusOpen, errorAutoFix, true, true, false},
+		{"open info auto-fix parks via ledger blocking summary", types.FindingLedgerStatusOpen, infoAutoFix, true, false, false},
+		{"open ask-user parks via ledger and ask-user paths", types.FindingLedgerStatusOpen, infoAskUser, true, false, true},
 		{"pending verification parks", types.FindingLedgerStatusPendingVerification, infoNoOp, true, false, false},
 		{"reconciliation parks", types.FindingLedgerStatusNeedsReconciliation, infoNoOp, true, false, false},
 	} {

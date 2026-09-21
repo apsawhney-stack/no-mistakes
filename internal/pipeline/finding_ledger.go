@@ -678,17 +678,16 @@ func (l *FindingLedger) buildEffectiveFindingsJSON(stepName types.StepName, roun
 // ledgerRequiresDisposition reports whether a step's effective findings payload
 // carries an entry the protocol still requires an explicit disposition for:
 // one that was selected for correction and not yet proven closed
-// (pending_verification), or one imported from pre-ledger history whose outcome
-// cannot be proven (needs_reconciliation).
+// (pending_verification), one imported from pre-ledger history whose outcome
+// cannot be proven (needs_reconciliation), or an open ledger entry that terminal
+// acceptance would refuse as blocking.
 //
-// It deliberately does NOT park on a merely `open` entry. Terminal acceptance
-// refuses pending and reconciliation entries unconditionally, so those must
-// reach a gate rather than dead-ending the run. An open entry that BLOCKS keeps
-// parking through the ordinary blocking-finding path
-// (hasBlockingFindingsJSON / hasAskUserFindingsJSON), which is the product's
-// long-standing rule; an open entry that is explicitly non-blocking - an
-// informational no-op note - must keep the same semantics it had before the
-// ledger existed and must not hold its step at a gate.
+// Terminal acceptance refuses pending and reconciliation entries
+// unconditionally, and refuses open entries when the ledger summary says an
+// unresolved entry is blocking by types.IsBlockingFinding. Those entries must
+// reach a gate rather than dead-ending the run. An open entry that is explicitly
+// non-blocking - an informational no-op note - keeps the same semantics it had
+// before the ledger existed and must not hold its step at a gate.
 func ledgerRequiresDisposition(raw string) bool {
 	if raw == "" {
 		return false
@@ -700,7 +699,7 @@ func ledgerRequiresDisposition(raw string) bool {
 	if parsed.Ledger == nil {
 		return false
 	}
-	return parsed.Ledger.PendingCount > 0 || parsed.Ledger.ReconcileCount > 0
+	return parsed.Ledger.PendingCount > 0 || parsed.Ledger.ReconcileCount > 0 || (parsed.Ledger.OpenCount > 0 && parsed.Ledger.HasBlocking)
 }
 
 func nextFreeID(prefix string, used map[string]bool) string {

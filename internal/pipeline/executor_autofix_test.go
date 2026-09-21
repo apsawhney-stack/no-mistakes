@@ -635,8 +635,8 @@ func TestExecutor_ParkedStepReleasesLogFileAfterCancel(t *testing.T) {
 // completes, the run completes, and terminal acceptance is satisfied - while the
 // finding stays visible in the ledger rather than being silently dropped.
 //
-// The companion half (pending verification and reconciliation still park) is
-// pinned by TestLedgerRequiresDispositionParksOnlyPendingOrReconciliation, whose
+// The companion half (blocking, pending verification, and reconciliation still
+// park) is pinned by TestLedgerRequiresDispositionParksForTerminalRefusals, whose
 // gate rule is the union of the ledger clause and the blocking/ask-user paths.
 func TestExecutor_LedgerDoesNotParkAnInfoOnlyFinding(t *testing.T) {
 	database, p, run, repo := setupTest(t)
