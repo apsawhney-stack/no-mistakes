@@ -428,15 +428,15 @@ func TestMarshalFindingsJSON_OmitsEmptySourceAndInstructions(t *testing.T) {
 
 func TestMergeUserOverrides_AttachesInstructions(t *testing.T) {
 	f := Findings{Items: []Finding{
-		{ID: "review-1", Severity: "error", Description: "bug"},
-		{ID: "review-2", Severity: "warning", Description: "style"},
+		{ID: "review-1", LedgerID: "fn-1", Severity: "error", Description: "bug"},
+		{ID: "review-2", LedgerID: "fn-2", Severity: "warning", Description: "style"},
 	}}
-	merged := MergeUserOverrides(f, map[string]string{"review-1": "only touch parser.go"}, nil)
+	merged := MergeUserOverrides(f, map[string]string{"review-1": "only touch parser.go", "fn-2": "preserve API"}, nil)
 	if merged.Items[0].UserInstructions != "only touch parser.go" {
 		t.Errorf("expected instruction attached to review-1, got %q", merged.Items[0].UserInstructions)
 	}
-	if merged.Items[1].UserInstructions != "" {
-		t.Errorf("unexpected instruction on review-2: %q", merged.Items[1].UserInstructions)
+	if merged.Items[1].UserInstructions != "preserve API" {
+		t.Errorf("expected ledger instruction on review-2, got %q", merged.Items[1].UserInstructions)
 	}
 	if f.Items[0].UserInstructions != "" {
 		t.Errorf("original findings mutated: %q", f.Items[0].UserInstructions)

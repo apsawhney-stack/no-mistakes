@@ -628,10 +628,7 @@ func (l *FindingLedger) buildEffectiveFindingsJSON(stepName types.StepName, roun
 
 	summary, err := l.db.GetFindingLedgerSummaryForStep(l.runID, stepName)
 	if err != nil {
-		summary = &types.FindingLedgerSummary{
-			ProtocolVersion: types.FindingLedgerProtocolVersion,
-			RunID:           l.runID,
-		}
+		return "", fmt.Errorf("load finding ledger summary for step %s: %w", stepName, err)
 	}
 
 	// Assign unique, unambiguous display IDs for items while tracking LedgerID.

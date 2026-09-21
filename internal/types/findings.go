@@ -504,6 +504,12 @@ func MergeUserOverrides(findings Findings, instructions map[string]string, added
 	for i := range result.Items {
 		if note, ok := instructions[result.Items[i].ID]; ok {
 			result.Items[i].UserInstructions = note
+			continue
+		}
+		if result.Items[i].LedgerID != "" {
+			if note, ok := instructions[result.Items[i].LedgerID]; ok {
+				result.Items[i].UserInstructions = note
+			}
 		}
 	}
 	used := make(map[string]bool, len(result.Items)+len(added))
