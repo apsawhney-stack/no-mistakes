@@ -37,6 +37,36 @@ func mustMarshalFindings(f types.Findings) string {
 	return s
 }
 
+func TestFindingLedger_AdmissionFailureFailsClosed(t *testing.T) {
+	database, runID, repoID := setupTestDB(t)
+	ctx := context.Background()
+	ledger := NewFindingLedger(database, runID, repoID)
+
+	finding := types.Finding{ID: "review-1", Severity: "error", Action: types.ActionAutoFix, File: "a.go", Line: 10, Description: "blocking defect"}
+	effective, err := ledger.ProcessRoundFindings(ctx, types.StepReview, "missing-step-result", 1, &StepOutcome{
+		Findings:        mustMarshalFindings(types.Findings{Items: []types.Finding{finding}}),
+		ReviewablePaths: []string{"a.go"},
+		ReviewedPaths:   []string{"a.go"},
+	}, "head-1")
+	if err == nil {
+		t.Fatal("ProcessRoundFindings succeeded, want insert failure")
+	}
+	parsed, parseErr := types.ParseFindingsJSON(effective)
+	if parseErr != nil {
+		t.Fatalf("parse returned findings: %v", parseErr)
+	}
+	if len(parsed.Items) != 1 || parsed.Items[0].Description != finding.Description {
+		t.Fatalf("returned findings = %+v, want original blocking finding", parsed.Items)
+	}
+	entries, entryErr := database.GetFindingLedgerEntriesByStep(runID, types.StepReview)
+	if entryErr != nil {
+		t.Fatalf("entries: %v", entryErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("entries count = %d, want 0", len(entries))
+	}
+}
+
 func TestFindingLedger_OriginalFailureShapeOmissionDoesNotClearFindings(t *testing.T) {
 	database, runID, repoID := setupTestDB(t)
 	ctx := context.Background()

@@ -364,7 +364,9 @@ func (l *FindingLedger) ProcessRoundFindings(
 			LastObservedFile:      item.File,
 			LastObservedLine:      item.Line,
 		}
-		_ = l.db.InsertFindingLedgerEntry(newEntry)
+		if err := l.db.InsertFindingLedgerEntry(newEntry); err != nil {
+			return outcome.Findings, fmt.Errorf("admit finding ledger entry: %w", err)
+		}
 
 		ev := &types.FindingLedgerEvent{
 			EntryID:      newEntry.ID,
