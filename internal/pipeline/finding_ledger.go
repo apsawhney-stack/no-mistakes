@@ -223,9 +223,6 @@ func (l *FindingLedger) ProcessRoundFindings(
 			e.ClosureReason = "superseded by a fresh settled CI observation"
 			e.ClosureEvidence = fmt.Sprintf("settled CI observation at head %s reported no failing check", shortCommit(currentCommitSHA))
 			e.DispositionProvenance = "ci_settled_observation"
-			if err := l.db.UpdateFindingLedgerEntry(e); err != nil {
-				return outcome.Findings, fmt.Errorf("update superseded finding ledger entry %s for step %s: %w", e.ID, stepName, err)
-			}
 
 			ev := &types.FindingLedgerEvent{
 				EntryID:      e.ID,
@@ -241,8 +238,8 @@ func (l *FindingLedger) ProcessRoundFindings(
 				Reason:       e.ClosureReason,
 				Provenance:   e.DispositionProvenance,
 			}
-			if err := l.db.RecordFindingLedgerEvent(ev); err != nil {
-				return outcome.Findings, fmt.Errorf("record superseded finding ledger event for entry %s in step %s: %w", e.ID, stepName, err)
+			if err := l.db.UpdateFindingLedgerEntryWithEvent(e, ev); err != nil {
+				return outcome.Findings, fmt.Errorf("supersede finding ledger entry %s for step %s: %w", e.ID, stepName, err)
 			}
 			continue
 		}
@@ -287,9 +284,6 @@ func (l *FindingLedger) ProcessRoundFindings(
 				e.ClosedInRound = roundNum
 				e.ClosureEvidence = evidence
 				e.ClosureReason = "verified fixed by independent closure review"
-				if err := l.db.UpdateFindingLedgerEntry(e); err != nil {
-					return outcome.Findings, fmt.Errorf("update verified finding ledger entry %s for step %s: %w", e.ID, stepName, err)
-				}
 
 				ev := &types.FindingLedgerEvent{
 					EntryID:      e.ID,
@@ -305,8 +299,8 @@ func (l *FindingLedger) ProcessRoundFindings(
 					Evidence:     evidence,
 					Reason:       e.ClosureReason,
 				}
-				if err := l.db.RecordFindingLedgerEvent(ev); err != nil {
-					return outcome.Findings, fmt.Errorf("record verified finding ledger event for entry %s in step %s: %w", e.ID, stepName, err)
+				if err := l.db.UpdateFindingLedgerEntryWithEvent(e, ev); err != nil {
+					return outcome.Findings, fmt.Errorf("verify finding ledger entry %s for step %s: %w", e.ID, stepName, err)
 				}
 				continue
 			}
@@ -393,10 +387,6 @@ func (l *FindingLedger) ProcessRoundFindings(
 			LastObservedFile:      item.File,
 			LastObservedLine:      item.Line,
 		}
-		if err := l.db.InsertFindingLedgerEntry(newEntry); err != nil {
-			return outcome.Findings, fmt.Errorf("admit finding ledger entry %s for step %s: %w", newEntry.ID, stepName, err)
-		}
-
 		ev := &types.FindingLedgerEvent{
 			EntryID:      newEntry.ID,
 			RunID:        l.runID,
@@ -408,8 +398,8 @@ func (l *FindingLedger) ProcessRoundFindings(
 			StateAfter:   types.FindingLedgerStatusOpen,
 			CommitSHA:    currentCommitSHA,
 		}
-		if err := l.db.RecordFindingLedgerEvent(ev); err != nil {
-			return outcome.Findings, fmt.Errorf("record admitted finding ledger event for entry %s in step %s: %w", newEntry.ID, stepName, err)
+		if err := l.db.InsertFindingLedgerEntryWithEvent(newEntry, ev); err != nil {
+			return outcome.Findings, fmt.Errorf("admit finding ledger entry %s for step %s: %w", newEntry.ID, stepName, err)
 		}
 	}
 
@@ -449,10 +439,6 @@ func (l *FindingLedger) handleMatchedFinding(
 		e.ClosureEvidence = ""
 	}
 
-	if err := l.db.UpdateFindingLedgerEntry(e); err != nil {
-		return fmt.Errorf("update matched finding ledger entry %s for step %s: %w", e.ID, stepName, err)
-	}
-
 	ev := &types.FindingLedgerEvent{
 		EntryID:      e.ID,
 		RunID:        l.runID,
@@ -463,8 +449,8 @@ func (l *FindingLedger) handleMatchedFinding(
 		StateBefore:  stateBefore,
 		StateAfter:   e.Status,
 	}
-	if err := l.db.RecordFindingLedgerEvent(ev); err != nil {
-		return fmt.Errorf("record matched finding ledger event for entry %s in step %s: %w", e.ID, stepName, err)
+	if err := l.db.UpdateFindingLedgerEntryWithEvent(e, ev); err != nil {
+		return fmt.Errorf("record matched finding ledger entry %s for step %s: %w", e.ID, stepName, err)
 	}
 	return nil
 }
@@ -824,9 +810,6 @@ func (l *FindingLedger) AdmitUserFindings(
 			CreatedAt:             now,
 			UpdatedAt:             now,
 		}
-		if err := l.db.InsertFindingLedgerEntry(newEntry); err != nil {
-			return fmt.Errorf("admit user finding ledger entry %s for step %s: %w", entryID, stepName, err)
-		}
 		ev := &types.FindingLedgerEvent{
 			EntryID:      entryID,
 			RunID:        l.runID,
@@ -839,8 +822,8 @@ func (l *FindingLedger) AdmitUserFindings(
 			Provenance:   "user_added",
 			CreatedAt:    now,
 		}
-		if err := l.db.RecordFindingLedgerEvent(ev); err != nil {
-			return fmt.Errorf("record user finding ledger event for entry %s in step %s: %w", entryID, stepName, err)
+		if err := l.db.InsertFindingLedgerEntryWithEvent(newEntry, ev); err != nil {
+			return fmt.Errorf("admit user finding ledger entry %s for step %s: %w", entryID, stepName, err)
 		}
 	}
 	return nil
@@ -880,9 +863,6 @@ func (l *FindingLedger) ProcessSelection(
 		if matched[e.ID] && e.Status == types.FindingLedgerStatusOpen {
 			e.Status = types.FindingLedgerStatusPendingVerification
 			e.SelectedInRound = roundNum
-			if err := l.db.UpdateFindingLedgerEntry(e); err != nil {
-				return fmt.Errorf("update selected finding ledger entry %s for step %s: %w", e.ID, stepName, err)
-			}
 
 			ev := &types.FindingLedgerEvent{
 				EntryID:      e.ID,
@@ -895,8 +875,8 @@ func (l *FindingLedger) ProcessSelection(
 				StateAfter:   types.FindingLedgerStatusPendingVerification,
 				Provenance:   source,
 			}
-			if err := l.db.RecordFindingLedgerEvent(ev); err != nil {
-				return fmt.Errorf("record selection finding ledger event for entry %s in step %s: %w", e.ID, stepName, err)
+			if err := l.db.UpdateFindingLedgerEntryWithEvent(e, ev); err != nil {
+				return fmt.Errorf("select finding ledger entry %s for step %s: %w", e.ID, stepName, err)
 			}
 		}
 	}
@@ -926,9 +906,6 @@ func (l *FindingLedger) RecordCorrectingRevision(
 		if e.Status == types.FindingLedgerStatusPendingVerification {
 			e.CorrectingCommitSHA = commitSHA
 			e.FixSessionID = sessionID
-			if err := l.db.UpdateFindingLedgerEntry(e); err != nil {
-				return fmt.Errorf("update correcting revision for finding ledger entry %s in step %s: %w", e.ID, stepName, err)
-			}
 
 			ev := &types.FindingLedgerEvent{
 				EntryID:     e.ID,
@@ -941,8 +918,8 @@ func (l *FindingLedger) RecordCorrectingRevision(
 				CommitSHA:   commitSHA,
 				SessionID:   sessionID,
 			}
-			if err := l.db.RecordFindingLedgerEvent(ev); err != nil {
-				return fmt.Errorf("record correcting revision finding ledger event for entry %s in step %s: %w", e.ID, stepName, err)
+			if err := l.db.UpdateFindingLedgerEntryWithEvent(e, ev); err != nil {
+				return fmt.Errorf("record correcting revision finding ledger entry %s in step %s: %w", e.ID, stepName, err)
 			}
 		}
 	}
@@ -1012,10 +989,6 @@ func (l *FindingLedger) ProcessExplicitDispositionForEntries(
 			}
 			e.DispositionProvenance = provenance + ":reconciled"
 		}
-		if err := l.db.UpdateFindingLedgerEntry(e); err != nil {
-			return fmt.Errorf("update disposed finding ledger entry %s for step %s: %w", e.ID, stepName, err)
-		}
-
 		ev := &types.FindingLedgerEvent{
 			EntryID:      e.ID,
 			RunID:        l.runID,
@@ -1028,8 +1001,8 @@ func (l *FindingLedger) ProcessExplicitDispositionForEntries(
 			Reason:       reason,
 			Provenance:   provenance,
 		}
-		if err := l.db.RecordFindingLedgerEvent(ev); err != nil {
-			return err
+		if err := l.db.UpdateFindingLedgerEntryWithEvent(e, ev); err != nil {
+			return fmt.Errorf("dispose finding ledger entry %s for step %s: %w", e.ID, stepName, err)
 		}
 	}
 	return nil

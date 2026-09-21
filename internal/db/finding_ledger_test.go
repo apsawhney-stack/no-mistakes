@@ -6,6 +6,69 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
+func TestFindingLedger_EntryEventWritesAreAtomic(t *testing.T) {
+	db := openTestDB(t)
+
+	repo, err := db.InsertRepo(t.TempDir(), "https://github.com/example/repo", "main")
+	if err != nil {
+		t.Fatalf("InsertRepo: %v", err)
+	}
+	run, err := db.InsertRun(repo.ID, "feature", "head-1", "base-1")
+	if err != nil {
+		t.Fatalf("InsertRun: %v", err)
+	}
+	sr, err := db.InsertStepResult(run.ID, types.StepReview)
+	if err != nil {
+		t.Fatalf("InsertStepResult: %v", err)
+	}
+	entry := &types.FindingLedgerEntry{
+		ID:                    "fn-atomic-insert",
+		RunID:                 run.ID,
+		RepoID:                repo.ID,
+		StepName:              types.StepReview,
+		FirstSeenRound:        1,
+		FirstSeenStepResultID: sr.ID,
+		ReportedID:            "review-1",
+		Fingerprint:           "fp-atomic",
+		Severity:              "error",
+		Action:                "auto-fix",
+		Description:           "atomic insert",
+		OriginalFindingJSON:   `{"id":"review-1","severity":"error","description":"atomic insert"}`,
+		CurrentFindingJSON:    `{"id":"review-1","severity":"error","description":"atomic insert"}`,
+		Status:                types.FindingLedgerStatusOpen,
+		IsBlocking:            true,
+		LastObservedRound:     1,
+	}
+	badEvent := &types.FindingLedgerEvent{EntryID: "missing-entry", RunID: run.ID, StepName: types.StepReview, Round: 1, EventType: types.FindingEventAdmitted, StateAfter: types.FindingLedgerStatusOpen}
+	if err := db.InsertFindingLedgerEntryWithEvent(entry, badEvent); err == nil {
+		t.Fatal("InsertFindingLedgerEntryWithEvent succeeded, want event failure")
+	}
+	got, err := db.GetFindingLedgerEntry(entry.ID)
+	if err != nil {
+		t.Fatalf("GetFindingLedgerEntry: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("entry was inserted despite event failure: %+v", got)
+	}
+
+	goodEvent := &types.FindingLedgerEvent{EntryID: entry.ID, RunID: run.ID, StepName: types.StepReview, Round: 1, EventType: types.FindingEventAdmitted, StateAfter: types.FindingLedgerStatusOpen}
+	if err := db.InsertFindingLedgerEntryWithEvent(entry, goodEvent); err != nil {
+		t.Fatalf("InsertFindingLedgerEntryWithEvent good event: %v", err)
+	}
+	entry.Status = types.FindingLedgerStatusPendingVerification
+	badUpdateEvent := &types.FindingLedgerEvent{EntryID: "missing-entry", RunID: run.ID, StepName: types.StepReview, Round: 2, EventType: types.FindingEventSelectedForCorrection, StateBefore: types.FindingLedgerStatusOpen, StateAfter: types.FindingLedgerStatusPendingVerification}
+	if err := db.UpdateFindingLedgerEntryWithEvent(entry, badUpdateEvent); err == nil {
+		t.Fatal("UpdateFindingLedgerEntryWithEvent succeeded, want event failure")
+	}
+	got, err = db.GetFindingLedgerEntry(entry.ID)
+	if err != nil {
+		t.Fatalf("GetFindingLedgerEntry after update failure: %v", err)
+	}
+	if got.Status != types.FindingLedgerStatusOpen {
+		t.Fatalf("status = %q, want rollback to open", got.Status)
+	}
+}
+
 func TestFindingLedger_CRUDAndEvents(t *testing.T) {
 	db := openTestDB(t)
 

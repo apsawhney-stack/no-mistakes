@@ -53,41 +53,43 @@ func (d *DB) InsertFindingLedgerEntry(entry *types.FindingLedgerEntry) error {
 
 // UpdateFindingLedgerEntry updates an existing finding ledger entry.
 func (d *DB) UpdateFindingLedgerEntry(entry *types.FindingLedgerEntry) error {
-	entry.UpdatedAt = now()
-	isBlockingInt := 0
-	if entry.IsBlocking {
-		isBlockingInt = 1
-	}
+	return updateLedgerEntryExec(d.sql, entry)
+}
 
-	res, err := d.sql.Exec(
-		`UPDATE finding_ledger_entries SET
-			severity = ?, action = ?, file = ?, line = ?, description = ?,
-			category = ?, check_name = ?, check_id = ?, decision_id = ?,
-			source = ?, user_instructions = ?, review_scope = ?,
-			current_finding_json = ?, status = ?, is_blocking = ?,
-			selected_in_round = ?, correcting_commit_sha = ?, fix_session_id = ?, closed_in_round = ?,
-			closure_evidence = ?, closure_reason = ?, disposition_provenance = ?,
-			last_observed_round = ?, last_observed_file = ?, last_observed_line = ?,
-			updated_at = ?
-		WHERE id = ?`,
-		entry.Severity, entry.Action, entry.File, entry.Line, entry.Description,
-		entry.Category, entry.Check, entry.CheckID, entry.DecisionID,
-		entry.Source, entry.UserInstructions, entry.ReviewScope,
-		entry.CurrentFindingJSON, entry.Status, isBlockingInt,
-		entry.SelectedInRound, entry.CorrectingCommitSHA, entry.FixSessionID, entry.ClosedInRound,
-		entry.ClosureEvidence, entry.ClosureReason, entry.DispositionProvenance,
-		entry.LastObservedRound, entry.LastObservedFile, entry.LastObservedLine,
-		entry.UpdatedAt, entry.ID,
-	)
+// InsertFindingLedgerEntryWithEvent atomically inserts an entry and its provenance event.
+func (d *DB) InsertFindingLedgerEntryWithEvent(entry *types.FindingLedgerEntry, event *types.FindingLedgerEvent) error {
+	tx, err := d.sql.Begin()
 	if err != nil {
-		return fmt.Errorf("update finding ledger entry: %w", err)
+		return fmt.Errorf("begin finding ledger entry/event insert: %w", err)
 	}
-	rowsAffected, err := res.RowsAffected()
+	defer tx.Rollback()
+	if err := insertLedgerEntryTx(tx, entry); err != nil {
+		return err
+	}
+	if err := insertLedgerEventTx(tx, event); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit finding ledger entry/event insert: %w", err)
+	}
+	return nil
+}
+
+// UpdateFindingLedgerEntryWithEvent atomically updates an entry and records its provenance event.
+func (d *DB) UpdateFindingLedgerEntryWithEvent(entry *types.FindingLedgerEntry, event *types.FindingLedgerEvent) error {
+	tx, err := d.sql.Begin()
 	if err != nil {
-		return fmt.Errorf("update finding ledger entry rows affected: %w", err)
+		return fmt.Errorf("begin finding ledger entry/event update: %w", err)
 	}
-	if rowsAffected == 0 {
-		return fmt.Errorf("finding ledger entry %q not found", entry.ID)
+	defer tx.Rollback()
+	if err := updateLedgerEntryExec(tx, entry); err != nil {
+		return err
+	}
+	if err := insertLedgerEventTx(tx, event); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit finding ledger entry/event update: %w", err)
 	}
 	return nil
 }
@@ -670,6 +672,49 @@ func writeLegacyMigrationTx(tx *sql.Tx, entries []*types.FindingLedgerEntry, eve
 		if err := insertLedgerEventTx(tx, event); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+type ledgerExec interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+func updateLedgerEntryExec(exec ledgerExec, entry *types.FindingLedgerEntry) error {
+	entry.UpdatedAt = now()
+	isBlockingInt := 0
+	if entry.IsBlocking {
+		isBlockingInt = 1
+	}
+	res, err := exec.Exec(
+		`UPDATE finding_ledger_entries SET
+			severity = ?, action = ?, file = ?, line = ?, description = ?,
+			category = ?, check_name = ?, check_id = ?, decision_id = ?,
+			source = ?, user_instructions = ?, review_scope = ?,
+			current_finding_json = ?, status = ?, is_blocking = ?,
+			selected_in_round = ?, correcting_commit_sha = ?, fix_session_id = ?, closed_in_round = ?,
+			closure_evidence = ?, closure_reason = ?, disposition_provenance = ?,
+			last_observed_round = ?, last_observed_file = ?, last_observed_line = ?,
+			updated_at = ?
+		WHERE id = ?`,
+		entry.Severity, entry.Action, entry.File, entry.Line, entry.Description,
+		entry.Category, entry.Check, entry.CheckID, entry.DecisionID,
+		entry.Source, entry.UserInstructions, entry.ReviewScope,
+		entry.CurrentFindingJSON, entry.Status, isBlockingInt,
+		entry.SelectedInRound, entry.CorrectingCommitSHA, entry.FixSessionID, entry.ClosedInRound,
+		entry.ClosureEvidence, entry.ClosureReason, entry.DispositionProvenance,
+		entry.LastObservedRound, entry.LastObservedFile, entry.LastObservedLine,
+		entry.UpdatedAt, entry.ID,
+	)
+	if err != nil {
+		return fmt.Errorf("update finding ledger entry: %w", err)
+	}
+	rowsAffected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update finding ledger entry rows affected: %w", err)
+	}
+	if rowsAffected == 0 {
+		return fmt.Errorf("finding ledger entry %q not found", entry.ID)
 	}
 	return nil
 }
