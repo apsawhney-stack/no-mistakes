@@ -1196,13 +1196,19 @@ rounds:
 						}
 					}
 					if hasSelectedMutation {
-						_, _ = e.workGenManager.HandleMutation(ctx, string(stepName)+"_selected_input_mutation", stepName, currentHead, verdict.ModifiedPaths)
+						if _, err := e.workGenManager.HandleMutation(ctx, string(stepName)+"_selected_input_mutation", stepName, currentHead, verdict.ModifiedPaths); err != nil {
+							return false, "", fmt.Errorf("step %s handle selected-input mutation: %w", stepName, err)
+						}
 						outcome.RestartFrom = types.StepReview
 					} else {
-						_, _ = e.workGenManager.HandleMutation(ctx, string(stepName)+"_narrative_mutation", stepName, currentHead, verdict.ModifiedPaths)
+						if _, err := e.workGenManager.HandleMutation(ctx, string(stepName)+"_narrative_mutation", stepName, currentHead, verdict.ModifiedPaths); err != nil {
+							return false, "", fmt.Errorf("step %s handle narrative mutation: %w", stepName, err)
+						}
 					}
 				} else if sctx.Fixing || (preSnapshot != nil && currentHead != preSnapshot.HeadSHA && (stepName == types.StepCI || stepName == types.StepReview || stepName == types.StepTest)) {
-					_, _ = e.workGenManager.HandleMutation(ctx, fmt.Sprintf("%s_fix_round_%d", stepName, roundNum), stepName, currentHead, verdict.ModifiedPaths)
+					if _, err := e.workGenManager.HandleMutation(ctx, fmt.Sprintf("%s_fix_round_%d", stepName, roundNum), stepName, currentHead, verdict.ModifiedPaths); err != nil {
+						return false, "", fmt.Errorf("step %s handle fix mutation: %w", stepName, err)
+					}
 				}
 			}
 		}

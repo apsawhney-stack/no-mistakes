@@ -24,8 +24,10 @@ import (
 type PhaseSnapshot struct {
 	Phase      types.StepName
 	HeadSHA    string
-	FileHashes map[string]string // relPath -> content hash
+	FileHashes map[string]string // relPath -> type/mode/content identity
 }
+
+type attestationPublishFunc func(context.Context, *types.WorkAttestation) error
 
 // WriteSetVerdict records the outcome of phase write-set verification.
 type WriteSetVerdict struct {
@@ -38,14 +40,15 @@ type WriteSetVerdict struct {
 // WorkGenerationManager manages the immutable work generations, validation plan,
 // phase results, write-set enforcement, transitive invalidations, and final attestation for a run.
 type WorkGenerationManager struct {
-	db       *db.DB
-	runID    string
-	repoID   string
-	workDir  string
-	config   *config.Config
-	plan     types.ValidationPlan
-	envelope *types.FinalEnvelope
-	mu       sync.Mutex
+	db                    *db.DB
+	runID                 string
+	repoID                string
+	workDir               string
+	config                *config.Config
+	plan                  types.ValidationPlan
+	envelope              *types.FinalEnvelope
+	attestationPublishers []attestationPublishFunc
+	mu                    sync.Mutex
 }
 
 // NewWorkGenerationManager initializes a WorkGenerationManager for a run.
@@ -95,6 +98,15 @@ func (m *WorkGenerationManager) Plan() types.ValidationPlan {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.plan
+}
+
+func (m *WorkGenerationManager) RegisterAttestationPublisher(fn func(context.Context, *types.WorkAttestation) error) {
+	if m == nil || fn == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.attestationPublishers = append(m.attestationPublishers, fn)
 }
 
 // EnsureGeneration ensures that an initial work generation exists for the run,
@@ -459,7 +471,12 @@ func (m *WorkGenerationManager) RecordPhaseResult(
 // 4. Publishes and returns the final WorkAttestation.
 func (m *WorkGenerationManager) AssertAcceptance(ctx context.Context, finalHeadSHA string, ciChecksGreen bool) (*types.WorkAttestation, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	locked := true
+	defer func() {
+		if locked {
+			m.mu.Unlock()
+		}
+	}()
 
 	currentGen, err := m.db.GetCurrentWorkGeneration(m.runID)
 	if err != nil {
@@ -564,6 +581,15 @@ func (m *WorkGenerationManager) AssertAcceptance(ctx context.Context, finalHeadS
 
 	// Seal generation
 	_ = m.db.SealWorkGeneration(m.runID, currentGen.ID, types.StepCI)
+
+	publishers := append([]attestationPublishFunc(nil), m.attestationPublishers...)
+	locked = false
+	m.mu.Unlock()
+	for _, publish := range publishers {
+		if err := publish(ctx, att); err != nil {
+			return nil, fmt.Errorf("publish final work attestation: %w", err)
+		}
+	}
 
 	return att, nil
 }
@@ -693,7 +719,7 @@ func (m *WorkGenerationManager) computeInputManifestLocked() (*types.InputManife
 	}, nil
 }
 
-// scanWorkTreeHashesLocked collects path->SHA256 mappings for files in workDir.
+// scanWorkTreeHashesLocked collects path->identity mappings for every non-directory entry in workDir.
 func (m *WorkGenerationManager) scanWorkTreeHashesLocked() (map[string]string, error) {
 	hashes := make(map[string]string)
 	if m.workDir == "" {
@@ -710,10 +736,11 @@ func (m *WorkGenerationManager) scanWorkTreeHashesLocked() (map[string]string, e
 		}
 		relSlash := filepath.ToSlash(rel)
 
-		if relSlash == ".git" || strings.HasPrefix(relSlash, ".git/") {
+		if relSlash == ".git" {
 			if d.IsDir() {
 				return filepath.SkipDir
 			}
+		} else if strings.HasPrefix(relSlash, ".git/") {
 			return nil
 		}
 
@@ -722,19 +749,31 @@ func (m *WorkGenerationManager) scanWorkTreeHashesLocked() (map[string]string, e
 		}
 
 		fi, err := os.Lstat(p)
-		if err != nil || !fi.Mode().IsRegular() {
-			return nil
-		}
-
-		f, err := os.Open(p)
 		if err != nil {
 			return nil
 		}
-		defer f.Close()
 
-		h := sha256.New()
-		_, _ = io.Copy(h, f)
-		hashes[relSlash] = hex.EncodeToString(h.Sum(nil))
+		mode := fi.Mode()
+		switch {
+		case mode.IsRegular():
+			f, err := os.Open(p)
+			if err != nil {
+				return nil
+			}
+			defer f.Close()
+			h := sha256.New()
+			_, _ = io.Copy(h, f)
+			hashes[relSlash] = fmt.Sprintf("regular:%o:%d:%s", uint32(mode.Perm()), fi.Size(), hex.EncodeToString(h.Sum(nil)))
+		case mode&os.ModeSymlink != 0:
+			target, err := os.Readlink(p)
+			if err != nil {
+				return nil
+			}
+			h := sha256.Sum256([]byte(target))
+			hashes[relSlash] = fmt.Sprintf("symlink:%o:%d:%s", uint32(mode.Perm()), fi.Size(), hex.EncodeToString(h[:]))
+		default:
+			hashes[relSlash] = fmt.Sprintf("other:%s:%d:%d", mode.String(), fi.Size(), fi.ModTime().UnixNano())
+		}
 
 		return nil
 	})

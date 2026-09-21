@@ -178,8 +178,10 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			if err := sctx.DB.UpdateRunPRURL(sctx.Run.ID, updated.URL); err != nil {
 				slog.Warn("failed to persist PR URL", "run", sctx.Run.ID, "url", updated.URL, "err", err)
 			}
+			registerFinalAttestationRestamp(sctx, host, updated)
 			return &pipeline.StepOutcome{PRURL: updated.URL}, nil
 		}
+		registerFinalAttestationRestamp(sctx, host, existing)
 		return &pipeline.StepOutcome{}, nil
 	}
 
@@ -215,7 +217,28 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			return nil, fmt.Errorf("created PR body differs from the proposed template and evidence; refusing successful publication")
 		}
 	}
+	registerFinalAttestationRestamp(sctx, host, created)
 	return &pipeline.StepOutcome{PRURL: created.URL}, nil
+}
+
+func registerFinalAttestationRestamp(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR) {
+	if sctx == nil || sctx.WorkGenManager == nil || host == nil || pr == nil {
+		return
+	}
+	copied := *pr
+	sctx.WorkGenManager.RegisterAttestationPublisher(func(ctx context.Context, att *types.WorkAttestation) error {
+		if att == nil {
+			return nil
+		}
+		steps, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
+		if err != nil {
+			return fmt.Errorf("query step results for final attestation: %w", err)
+		}
+		policy := attestationPolicyFrom(sctx)
+		policy.WorkEnvelopeDigest = att.FinalEnvelopeDigest
+		policy.WorkAttestationDigest = att.AttestationDigest
+		return restampPRAttestationWithSteps(ctx, host, &copied, att.FinalHeadSHA, steps, sctx.Log, policy)
+	})
 }
 
 // retargetExistingPRIfNeeded moves an already-open PR onto a per-run
