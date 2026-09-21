@@ -1184,7 +1184,7 @@ rounds:
 		if outcome.AutoFixable && autoFixLimit > 0 && autoFixAttempts < autoFixLimit {
 			fixableFindings := autoFixableFindingsJSON(roundFindings)
 			if e.findingLedger != nil {
-				fixableFindings = autoFixableFindingsJSON(effectiveFindings)
+				fixableFindings = autoFixableLedgerFindingsJSON(effectiveFindings)
 			} else if carryFindings {
 				fixableFindings = remapFindingIDsJSON(effectiveFindings, fixableFindings)
 			}

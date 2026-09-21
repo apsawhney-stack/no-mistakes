@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -706,7 +707,26 @@ func (h *Harness) runGit(ctx context.Context, dir string, args ...string) ([]byt
 		"GIT_COMMITTER_NAME=E2E Test",
 		"GIT_COMMITTER_EMAIL=e2e@example.com",
 	)
-	return cmd.CombinedOutput()
+	outputFile, err := os.CreateTemp("", "no-mistakes-e2e-git-*.log")
+	if err != nil {
+		return nil, err
+	}
+	defer os.Remove(outputFile.Name())
+	defer outputFile.Close()
+	cmd.Stdout = outputFile
+	cmd.Stderr = outputFile
+	runErr := cmd.Run()
+	if _, err := outputFile.Seek(0, 0); err != nil {
+		if runErr != nil {
+			return nil, runErr
+		}
+		return nil, err
+	}
+	out, readErr := io.ReadAll(outputFile)
+	if runErr != nil {
+		return out, runErr
+	}
+	return out, readErr
 }
 
 // repoID mirrors gate.repoID(): sha256 of the absolute work path, first

@@ -263,6 +263,41 @@ func autoFixableFindingsJSON(raw string) string {
 	return fixableRaw
 }
 
+func autoFixableLedgerFindingsJSON(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	findings, err := types.ParseFindingsJSON(raw)
+	if err != nil {
+		return raw
+	}
+	if findings.Ledger == nil {
+		return autoFixableFindingsJSON(raw)
+	}
+	ledgerStatus := make(map[string]string, len(findings.Ledger.Entries))
+	for _, entry := range findings.Ledger.Entries {
+		ledgerStatus[entry.ID] = entry.Status
+	}
+	filtered := types.FindingsMetadata(findings)
+	for _, item := range findings.Items {
+		if item.ActionOrDefault() != types.ActionAutoFix {
+			continue
+		}
+		if item.LedgerID != "" && ledgerStatus[item.LedgerID] != types.FindingLedgerStatusOpen {
+			continue
+		}
+		filtered.Items = append(filtered.Items, item)
+	}
+	if len(filtered.Items) == 0 {
+		return ""
+	}
+	filteredRaw, err := types.MarshalFindingsJSON(filtered)
+	if err != nil {
+		return raw
+	}
+	return filteredRaw
+}
+
 func hasAskUserFindingsJSON(raw string) bool {
 	if raw == "" {
 		return false
