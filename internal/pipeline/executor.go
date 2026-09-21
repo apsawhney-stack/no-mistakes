@@ -477,7 +477,9 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	}
 	if reconciled, reconcileErr := e.reconcileApprovalGate(ctx, gate.step, reconcileCtx, gate.findings); reconciled {
 		if e.findingLedger != nil {
-			_ = e.findingLedger.ProcessExplicitDisposition(ctx, gate.step.Name(), gate.stepResult.ID, gate.round, types.ActionApprove, "approval gate reconciled externally", "gate_reconciled")
+			if err := e.findingLedger.ProcessExplicitDisposition(ctx, gate.step.Name(), gate.stepResult.ID, gate.round, types.ActionApprove, "approval gate reconciled externally", "gate_reconciled"); err != nil {
+				return e.failRun(run, repo, fmt.Errorf("step %s finding ledger disposition: %w", gate.step.Name(), err), ctx)
+			}
 		}
 		if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
 			return e.failRun(run, repo, fmt.Errorf("complete reconciled awaiting-agent state: %w", dbErr), ctx)
@@ -526,7 +528,9 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	}
 	if reconciled {
 		if e.findingLedger != nil {
-			_ = e.findingLedger.ProcessExplicitDisposition(ctx, gate.step.Name(), gate.stepResult.ID, gate.round, types.ActionApprove, "approval gate reconciled externally", "gate_reconciled")
+			if err := e.findingLedger.ProcessExplicitDisposition(ctx, gate.step.Name(), gate.stepResult.ID, gate.round, types.ActionApprove, "approval gate reconciled externally", "gate_reconciled"); err != nil {
+				return e.failRun(run, repo, fmt.Errorf("step %s finding ledger disposition: %w", gate.step.Name(), err), ctx)
+			}
 		}
 		return completeReconciledGate()
 	}
@@ -547,7 +551,9 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	case types.ActionApprove:
 		e.recordDeclinedRound(gate.lastRoundID, gate.findings, gate.step.Name(), gate.round)
 		if e.findingLedger != nil {
-			_ = e.findingLedger.ProcessExplicitDisposition(ctx, gate.step.Name(), gate.stepResult.ID, gate.round, types.ActionApprove, response.approvalReason, "user_approval")
+			if err := e.findingLedger.ProcessExplicitDisposition(ctx, gate.step.Name(), gate.stepResult.ID, gate.round, types.ActionApprove, response.approvalReason, "user_approval"); err != nil {
+				return e.failRun(run, repo, fmt.Errorf("step %s finding ledger approval: %w", gate.step.Name(), err), ctx)
+			}
 		}
 		if err := e.applyApprovalOverride(gate.step, reconcileCtx, gate.stepResult.ID, response.approvalReason); err != nil {
 			return e.failRun(run, repo, err, ctx)
@@ -560,7 +566,9 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	case types.ActionSkip:
 		e.recordDeclinedRound(gate.lastRoundID, gate.findings, gate.step.Name(), gate.round)
 		if e.findingLedger != nil {
-			_ = e.findingLedger.ProcessExplicitDisposition(ctx, gate.step.Name(), gate.stepResult.ID, gate.round, types.ActionSkip, "step skipped by user", "user_skip")
+			if err := e.findingLedger.ProcessExplicitDisposition(ctx, gate.step.Name(), gate.stepResult.ID, gate.round, types.ActionSkip, "step skipped by user", "user_skip"); err != nil {
+				return e.failRun(run, repo, fmt.Errorf("step %s finding ledger skip: %w", gate.step.Name(), err), ctx)
+			}
 		}
 		if err := e.db.CompleteStepWithStatus(gate.stepResult.ID, types.StepStatusSkipped, recoveredExitCode(gate.stepResult), duration, recoveredLogPath(gate.stepResult)); err != nil {
 			return e.failRun(run, repo, fmt.Errorf("skip recovered step %s: %w", gate.step.Name(), err), ctx)
@@ -605,11 +613,15 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 						}
 					}
 					if len(userAdded) > 0 {
-						_ = e.findingLedger.AdmitUserFindings(ctx, gate.step.Name(), gate.stepResult.ID, gate.round, userAdded)
+						if err := e.findingLedger.AdmitUserFindings(ctx, gate.step.Name(), gate.stepResult.ID, gate.round, userAdded); err != nil {
+							return e.failRun(run, repo, fmt.Errorf("step %s finding ledger admit user findings: %w", gate.step.Name(), err), ctx)
+						}
 					}
 				}
 			}
-			_ = e.findingLedger.ProcessSelection(ctx, gate.step.Name(), gate.stepResult.ID, gate.round, allSelectedIDs, "user")
+			if err := e.findingLedger.ProcessSelection(ctx, gate.step.Name(), gate.stepResult.ID, gate.round, allSelectedIDs, "user"); err != nil {
+				return e.failRun(run, repo, fmt.Errorf("step %s finding ledger selection: %w", gate.step.Name(), err), ctx)
+			}
 		}
 		if gate.lastRoundID != "" {
 			if idsJSON := marshalFindingIDs(allSelectedIDs); idsJSON != "" {
@@ -1197,7 +1209,9 @@ rounds:
 				sctx.PreviousFindings = fixableFindings
 				sctx.DeferredFindings = removeMatchingFindingsJSON(effectiveFindings, fixableFindings)
 				if e.findingLedger != nil {
-					_ = e.findingLedger.ProcessSelection(ctx, stepName, sr.ID, roundNum, findingIDList(fixableFindings), "auto_fix")
+					if err := e.findingLedger.ProcessSelection(ctx, stepName, sr.ID, roundNum, findingIDList(fixableFindings), "auto_fix"); err != nil {
+						return false, "", fmt.Errorf("step %s finding ledger auto-fix selection: %w", stepName, err)
+					}
 				}
 				if carryFindings {
 					pendingVerificationIDs = combineFindingIDLists(pendingVerificationIDs, findingIDList(fixableFindings))
@@ -1273,7 +1287,9 @@ rounds:
 			}
 			if reconciled {
 				if e.findingLedger != nil {
-					_ = e.findingLedger.ProcessExplicitDisposition(ctx, stepName, sr.ID, roundNum, types.ActionApprove, "approval gate reconciled externally", "gate_reconciled")
+					if err := e.findingLedger.ProcessExplicitDisposition(ctx, stepName, sr.ID, roundNum, types.ActionApprove, "approval gate reconciled externally", "gate_reconciled"); err != nil {
+						return false, "", fmt.Errorf("step %s finding ledger disposition: %w", stepName, err)
+					}
 				}
 				phaseStart = time.Now()
 				goto done
@@ -1298,7 +1314,9 @@ rounds:
 				// so the done label computes no additional elapsed.
 				e.recordDeclinedRound(currentRoundID, effectiveFindings, stepName, roundNum)
 				if e.findingLedger != nil {
-					_ = e.findingLedger.ProcessExplicitDisposition(ctx, stepName, sr.ID, roundNum, types.ActionApprove, response.approvalReason, "user_approval")
+					if err := e.findingLedger.ProcessExplicitDisposition(ctx, stepName, sr.ID, roundNum, types.ActionApprove, response.approvalReason, "user_approval"); err != nil {
+						return false, "", fmt.Errorf("step %s finding ledger approval: %w", stepName, err)
+					}
 				}
 				if err := e.applyApprovalOverride(step, sctx, sr.ID, response.approvalReason); err != nil {
 					return false, "", err
@@ -1310,7 +1328,9 @@ rounds:
 				// Skip - mark step skipped and return (not an error)
 				e.recordDeclinedRound(currentRoundID, effectiveFindings, stepName, roundNum)
 				if e.findingLedger != nil {
-					_ = e.findingLedger.ProcessExplicitDisposition(ctx, stepName, sr.ID, roundNum, types.ActionSkip, "step skipped by user", "user_skip")
+					if err := e.findingLedger.ProcessExplicitDisposition(ctx, stepName, sr.ID, roundNum, types.ActionSkip, "step skipped by user", "user_skip"); err != nil {
+						return false, "", fmt.Errorf("step %s finding ledger skip: %w", stepName, err)
+					}
 				}
 				if err := e.db.CompleteStepWithStatus(sr.ID, types.StepStatusSkipped, finalExitCode, executionMS, logPath); err != nil {
 					return false, "", fmt.Errorf("complete step %s (skip): %w", stepName, err)
@@ -1365,11 +1385,15 @@ rounds:
 								}
 							}
 							if len(userAdded) > 0 {
-								_ = e.findingLedger.AdmitUserFindings(ctx, stepName, sr.ID, roundNum, userAdded)
+								if err := e.findingLedger.AdmitUserFindings(ctx, stepName, sr.ID, roundNum, userAdded); err != nil {
+									return false, "", fmt.Errorf("step %s finding ledger admit user findings: %w", stepName, err)
+								}
 							}
 						}
 					}
-					_ = e.findingLedger.ProcessSelection(ctx, stepName, sr.ID, roundNum, allSelectedIDs, "user")
+					if err := e.findingLedger.ProcessSelection(ctx, stepName, sr.ID, roundNum, allSelectedIDs, "user"); err != nil {
+						return false, "", fmt.Errorf("step %s finding ledger selection: %w", stepName, err)
+					}
 				}
 				nextTrigger = "auto_fix"
 				if currentRoundID != "" {
