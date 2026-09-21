@@ -575,18 +575,23 @@ func TestExecutor_ParkedStepReleasesLogFileAfterCancel(t *testing.T) {
 	}
 }
 
-// TestExecutor_LedgerParksANonBlockingUnresolvedEntry pins the terminal-acceptance
-// backstop: the ledger refuses a clean completion while any entry is unresolved,
-// including a non-blocking one that the severity checks would otherwise let
-// through, so the run reaches a gate instead of dead-ending in a failed run.
-func TestExecutor_LedgerParksANonBlockingUnresolvedEntry(t *testing.T) {
+// TestExecutor_LedgerDoesNotParkAnInfoOnlyFinding pins the product semantics the
+// durable ledger must preserve: an informational, explicitly non-blocking
+// finding keeps the behavior it had before the ledger existed - the step
+// completes, the run completes, and terminal acceptance is satisfied - while the
+// finding stays visible in the ledger rather than being silently dropped.
+//
+// The companion half (pending verification and reconciliation still park) is
+// pinned by TestLedgerRequiresDispositionParksOnlyPendingOrReconciliation, whose
+// gate rule is the union of the ledger clause and the blocking/ask-user paths.
+func TestExecutor_LedgerDoesNotParkAnInfoOnlyFinding(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := t.TempDir()
 
 	step := &adaptiveCallStep{name: types.StepReview, fn: func(sctx *StepContext) (*StepOutcome, error) {
 		return &StepOutcome{
-			// Non-blocking: informational and no-op, so the ordinary severity
-			// checks see nothing to park on.
+			// Non-blocking: informational and no-op, so neither the severity
+			// checks nor the ledger's pending/reconciliation clause parks.
 			Findings:        `{"findings":[{"id":"info-1","severity":"info","description":"nit","action":"no-op"}],"summary":"1 note"}`,
 			ReviewedPaths:   []string{"main.go"},
 			ReviewablePaths: []string{"main.go"},
@@ -599,34 +604,23 @@ func TestExecutor_LedgerParksANonBlockingUnresolvedEntry(t *testing.T) {
 
 	select {
 	case err := <-done:
-		t.Fatalf("run completed over an unresolved ledger entry: %v", err)
-	case <-time.After(300 * time.Millisecond):
-	}
-
-	// The entry is unresolved, so the ledger parked the step for a decision.
-	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
-	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
-		t.Fatalf("approve: %v", err)
-	}
-	select {
-	case err := <-done:
 		if err != nil {
 			t.Fatalf("Execute() error = %v", err)
 		}
 	case <-time.After(10 * time.Second):
-		t.Fatal("executor timed out after approving the ledger gate")
+		t.Fatal("an info-only finding parked its step")
 	}
 
-	// The explicit acceptance is recorded as a disposition, never as a fix.
+	// The finding is still durable and visible, and it never counted as fixed.
 	entries, err := database.GetFindingLedgerEntries(run.ID)
 	if err != nil {
 		t.Fatalf("ledger entries: %v", err)
 	}
-	if len(entries) != 1 || entries[0].Status != types.FindingLedgerStatusClosedAccepted {
-		t.Fatalf("ledger entries = %+v, want one closed_accepted entry", entries)
+	if len(entries) != 1 || entries[0].Status != types.FindingLedgerStatusOpen {
+		t.Fatalf("ledger entries = %+v, want one still-open entry", entries)
 	}
-	if entries[0].DispositionProvenance == "" {
-		t.Fatal("accepted entry lost its disposition provenance")
+	if entries[0].IsBlocking {
+		t.Fatalf("info/no-op entry recorded as blocking: %+v", entries[0])
 	}
 	sr := findingsStepResult(t, database, run.ID, types.StepReview)
 	stats, err := database.StepFindingStats(sr)
@@ -634,6 +628,6 @@ func TestExecutor_LedgerParksANonBlockingUnresolvedEntry(t *testing.T) {
 		t.Fatalf("stats: %v", err)
 	}
 	if stats.ReportedFindings != 1 || stats.FixedFindings != 0 {
-		t.Fatalf("stats = %+v, want 1 reported and 0 fixed (accepted is not a fix)", stats)
+		t.Fatalf("stats = %+v, want 1 reported and 0 fixed", stats)
 	}
 }

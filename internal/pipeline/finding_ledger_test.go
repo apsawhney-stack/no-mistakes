@@ -748,10 +748,15 @@ func TestFindingLedger_StepOwnedFindingsStayOutOfTheLedger(t *testing.T) {
 		t.Fatalf("summary = %+v, want exactly the one analyzer finding", parsed.Ledger)
 	}
 	if parsed.Ledger.Unresolved() == 0 {
-		t.Fatal("an unresolved analyzer finding must keep the gate parked")
+		t.Fatal("an unresolved analyzer finding must stay visible")
 	}
-	if !ledgerRequiresDisposition(effective) {
-		t.Fatal("ledgerRequiresDisposition missed the unresolved analyzer finding")
+	// An open BLOCKING entry parks through the ordinary blocking-finding path,
+	// not through the ledger's pending/reconciliation clause.
+	if !hasBlockingFindingsJSON(effective) {
+		t.Fatal("an open blocking analyzer finding must still park its gate")
+	}
+	if ledgerRequiresDisposition(effective) {
+		t.Fatal("ledgerRequiresDisposition must not be the path that parks an open blocking entry")
 	}
 }
 
@@ -835,7 +840,7 @@ func TestFindingLedger_CISettledObservationSupersedesChecksOnly(t *testing.T) {
 	if len(parsed.Items) != 1 || parsed.Items[0].ID != "bot-1" {
 		t.Fatalf("effective findings = %+v, want only the review-bot comment", parsed.Items)
 	}
-	if !ledgerRequiresDisposition(effective) {
+	if !hasBlockingFindingsJSON(effective) {
 		t.Fatal("an outstanding review-bot comment must keep the gate parked")
 	}
 	// Supersession is not a verified fix: it must never read as Fixed.
@@ -1365,5 +1370,83 @@ func TestFindingLedger_CISelectedRepairClosesVerifiedNotSuperseded(t *testing.T)
 	}
 	if stats.FixedFindings != 1 || stats.ReportedFindings != 1 {
 		t.Fatalf("stats = %+v, want the repaired check counted as fixed", stats)
+	}
+}
+
+// TestLedgerRequiresDispositionParksOnlyPendingOrReconciliation pins the gate
+// rule the accepted Increment E contract requires: the ledger clause exists to
+// stop a run dead-ending at terminal acceptance, and terminal acceptance refuses
+// exactly pending-verification and reconciliation-required entries. A merely
+// open entry keeps the semantics the product already had - a blocking one parks
+// through hasBlockingFindingsJSON / hasAskUserFindingsJSON, and an explicitly
+// non-blocking informational no-op does not park at all.
+func TestLedgerRequiresDispositionParksOnlyPendingOrReconciliation(t *testing.T) {
+	payload := func(status string, blocking types.Finding) string {
+		summary := &types.FindingLedgerSummary{
+			ProtocolVersion: types.FindingLedgerProtocolVersion,
+			TotalEntries:    1,
+		}
+		switch status {
+		case types.FindingLedgerStatusOpen:
+			summary.OpenCount = 1
+		case types.FindingLedgerStatusPendingVerification:
+			summary.PendingCount = 1
+		case types.FindingLedgerStatusNeedsReconciliation:
+			summary.ReconcileCount = 1
+		}
+		if types.IsBlockingFinding(blocking) {
+			summary.HasBlocking = true
+		}
+		out, err := types.MarshalFindingsJSON(types.Findings{Items: []types.Finding{blocking}, Ledger: summary})
+		if err != nil {
+			t.Fatalf("marshal findings: %v", err)
+		}
+		return out
+	}
+	// A payload with no ledger at all (a pre-ledger or ledger-free step) must
+	// never be read as requiring a disposition, and must not panic.
+	if ledgerRequiresDisposition(`{"findings":[]}`) {
+		t.Fatal("a payload without a ledger summary must not require a disposition")
+	}
+	if ledgerRequiresDisposition("") {
+		t.Fatal("an empty payload must not require a disposition")
+	}
+
+	infoNoOp := types.Finding{ID: "info-1", Severity: "info", Action: types.ActionNoOp, File: "a.go", Description: "note"}
+	errorAutoFix := types.Finding{ID: "err-1", Severity: "error", Action: types.ActionAutoFix, File: "a.go", Description: "defect"}
+	infoAskUser := types.Finding{ID: "ask-1", Severity: "info", Action: types.ActionAskUser, File: "a.go", Description: "decide"}
+
+	for _, tc := range []struct {
+		name         string
+		status       string
+		finding      types.Finding
+		wantLedger   bool
+		wantBlocking bool
+		wantAskUser  bool
+	}{
+		{"open info no-op keeps product semantics", types.FindingLedgerStatusOpen, infoNoOp, false, false, false},
+		{"open error parks via the blocking path", types.FindingLedgerStatusOpen, errorAutoFix, false, true, false},
+		{"open ask-user parks via the ask-user path", types.FindingLedgerStatusOpen, infoAskUser, false, false, true},
+		{"pending verification parks", types.FindingLedgerStatusPendingVerification, infoNoOp, true, false, false},
+		{"reconciliation parks", types.FindingLedgerStatusNeedsReconciliation, infoNoOp, true, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := payload(tc.status, tc.finding)
+			if got := ledgerRequiresDisposition(raw); got != tc.wantLedger {
+				t.Fatalf("ledgerRequiresDisposition = %v, want %v", got, tc.wantLedger)
+			}
+			if got := hasBlockingFindingsJSON(raw); got != tc.wantBlocking {
+				t.Fatalf("hasBlockingFindingsJSON = %v, want %v", got, tc.wantBlocking)
+			}
+			if got := hasAskUserFindingsJSON(raw); got != tc.wantAskUser {
+				t.Fatalf("hasAskUserFindingsJSON = %v, want %v", got, tc.wantAskUser)
+			}
+			// The union of the three decides whether the step parks.
+			parks := ledgerRequiresDisposition(raw) || hasBlockingFindingsJSON(raw) || hasAskUserFindingsJSON(raw)
+			want := tc.wantLedger || tc.wantBlocking || tc.wantAskUser
+			if parks != want {
+				t.Fatalf("step parks = %v, want %v", parks, want)
+			}
+		})
 	}
 }

@@ -127,7 +127,9 @@ A run is refused a clean completion for any unresolved ledger state that would o
 - any entry is `pending_verification` without closure evidence
 - any entry `needs_reconciliation`
 
-The executor also parks a step whose unresolved ledger set is non-empty even when the entries are not blocking by severity, so an unresolved nonblocking entry reaches a gate for a decision instead of dead-ending the run at terminal acceptance.
+The executor also parks a step for the entries terminal acceptance refuses unconditionally: an entry in **pending verification** or **reconciliation required** reaches a gate for a decision instead of dead-ending the run at terminal acceptance.
+
+A merely `open` entry keeps the semantics it had before the ledger existed. A blocking one parks its step through the ordinary blocking and ask-user finding checks, and an explicitly non-blocking informational no-op note does not park its step at all; it stays visible in the ledger until something disposes of it.
 
 ## Legacy runs
 
