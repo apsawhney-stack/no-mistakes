@@ -98,9 +98,12 @@ func (r *ValidationPlanRaw) ToValidationPlan(cfg *Config) types.ValidationPlan {
 		writeSets["document"] = []string{"docs/**", "*.md", "README*"}
 	}
 	if _, ok := writeSets["review"]; !ok {
-		writeSets["review"] = []string{"**/*"}
+		writeSets["review"] = []string{}
 	}
-	exclusions := []string{".git/**", ".no-mistakes.yaml"}
+	if _, ok := writeSets["review_fix"]; !ok {
+		writeSets["review_fix"] = []string{"**/*"}
+	}
+	exclusions := defaultProtectedExclusions()
 	if len(r.ProtectedExclusions) > 0 {
 		exclusions = append(exclusions, r.ProtectedExclusions...)
 	}
@@ -146,15 +149,16 @@ func DefaultConservativeValidationPlan(cfg *Config) types.ValidationPlan {
 		}
 	}
 	writeSets := map[string][]string{
-		"review":   {"**/*"},
-		"test":     {},
-		"document": {"docs/**", "*.md", "README*"},
-		"lint":     {},
-		"push":     {},
-		"pr":       {},
-		"ci":       {},
+		"review":     {},
+		"review_fix": {"**/*"},
+		"test":       {},
+		"document":   {"docs/**", "*.md", "README*"},
+		"lint":       {},
+		"push":       {},
+		"pr":         {},
+		"ci":         {},
 	}
-	exclusions := []string{".git/**", ".no-mistakes.yaml"}
+	exclusions := defaultProtectedExclusions()
 	if cfg != nil && len(cfg.ProtectedPaths) > 0 {
 		exclusions = append(exclusions, cfg.ProtectedPaths...)
 	}
@@ -172,4 +176,18 @@ func DefaultConservativeValidationPlan(cfg *Config) types.ValidationPlan {
 	}
 	plan.PlanDigest = types.ComputePlanDigest(&plan)
 	return plan
+}
+
+func defaultProtectedExclusions() []string {
+	return []string{
+		".git",
+		".git/**",
+		".no-mistakes.yaml",
+		".no-mistakes/**",
+		"**/*.pem",
+		"**/*.key",
+		"**/*token*",
+		"**/*secret*",
+		"**/*credential*",
+	}
 }

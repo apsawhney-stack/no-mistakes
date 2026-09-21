@@ -1179,6 +1179,9 @@ rounds:
 				return false, "", fmt.Errorf("step %s check post-state: %w", stepName, vErr)
 			}
 			if !verdict.Allowed {
+				if err := e.workGenManager.RestoreSnapshot(ctx, preSnapshot); err != nil {
+					return false, "", fmt.Errorf("step %s restore unauthorized writes: %w", stepName, err)
+				}
 				unauthOutcome := UnauthorizedWriteOutcome(stepName, verdict.UnauthorizedPaths, verdict.Reason)
 				outcome.NeedsApproval = true
 				outcome.Findings = mergeFindingsJSON(outcome.Findings, unauthOutcome.Findings)
@@ -1942,7 +1945,11 @@ func (e *Executor) completeRun(run *db.Run, repo *db.Repo) error {
 		headSHA = verifiedHead
 	}
 	if e.workGenManager != nil {
-		if _, err := e.workGenManager.AssertAcceptance(context.Background(), headSHA, true); err != nil {
+		ciIdentity, err := e.workAttestationCIIdentity(run.ID)
+		if err != nil {
+			return err
+		}
+		if _, err := e.workGenManager.AssertAcceptanceWithCIEvidence(context.Background(), headSHA, ciIdentity); err != nil {
 			return err
 		}
 	}
@@ -1961,6 +1968,50 @@ func (e *Executor) completeRun(run *db.Run, repo *db.Repo) error {
 	run.Status = types.RunCompleted
 	e.emitRunEvent(ipc.EventRunCompleted, run, repo)
 	return nil
+}
+
+func (e *Executor) workAttestationCIIdentity(runID string) (string, error) {
+	ciRequired := false
+	if e.workGenManager != nil {
+		for _, phase := range e.workGenManager.Plan().RequiredPhases {
+			if phase == types.StepCI {
+				ciRequired = true
+				break
+			}
+		}
+	}
+	if !ciRequired {
+		return "ci_not_required", nil
+	}
+	run, err := e.db.GetRun(runID)
+	if err != nil {
+		return "", fmt.Errorf("load run CI evidence: %w", err)
+	}
+	if run != nil && run.CIReadyNoCI {
+		return "declared_no_ci", nil
+	}
+	if e.config != nil && e.config.NoCI {
+		return "declared_no_ci", nil
+	}
+	steps, err := e.db.GetStepsByRun(runID)
+	if err != nil {
+		return "", fmt.Errorf("load CI step evidence: %w", err)
+	}
+	for _, step := range steps {
+		if step.StepName != types.StepCI {
+			continue
+		}
+		if step.OverrideReason != nil && strings.TrimSpace(*step.OverrideReason) != "" {
+			return "ci_approval_override", nil
+		}
+		if step.Status == types.StepStatusCompleted {
+			return "ci_checks_green", nil
+		}
+		if step.Status == types.StepStatusSkipped && run != nil && run.CIReadyNoCI {
+			return "declared_no_ci", nil
+		}
+	}
+	return "", fmt.Errorf("terminal acceptance refused: no CI evidence recorded for work attestation")
 }
 
 func (e *Executor) reconcileTerminalRunHead(run *db.Run) (string, bool) {

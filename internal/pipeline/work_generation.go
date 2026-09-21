@@ -214,6 +214,32 @@ func (m *WorkGenerationManager) CheckPhasePreState(ctx context.Context, phase ty
 	}, nil
 }
 
+func (m *WorkGenerationManager) RestoreSnapshot(ctx context.Context, pre *PhaseSnapshot) error {
+	if m == nil || pre == nil || strings.TrimSpace(m.workDir) == "" {
+		return fmt.Errorf("restore phase snapshot: missing worktree or snapshot")
+	}
+	if strings.TrimSpace(pre.HeadSHA) != "" {
+		if _, err := git.Run(ctx, m.workDir, "reset", "--hard", pre.HeadSHA); err != nil {
+			return fmt.Errorf("reset worktree to pre-phase head: %w", err)
+		}
+	} else if _, err := git.Run(ctx, m.workDir, "reset", "--hard"); err != nil {
+		return fmt.Errorf("reset worktree: %w", err)
+	}
+	if _, err := git.Run(ctx, m.workDir, "clean", "-fdx"); err != nil {
+		return fmt.Errorf("clean unauthorized worktree writes: %w", err)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	restored, err := m.scanWorkTreeHashesLocked()
+	if err != nil {
+		return fmt.Errorf("verify restored worktree snapshot: %w", err)
+	}
+	if !sameSnapshotHashes(pre.FileHashes, restored) {
+		return fmt.Errorf("restore phase snapshot: restored worktree does not match pre-phase snapshot")
+	}
+	return nil
+}
+
 // CheckPhasePostState compares pre/post snapshots to enforce phase-scoped write sets.
 func (m *WorkGenerationManager) CheckPhasePostState(ctx context.Context, phase types.StepName, fixing bool, pre *PhaseSnapshot) (*WriteSetVerdict, error) {
 	m.mu.Lock()
@@ -470,6 +496,14 @@ func (m *WorkGenerationManager) RecordPhaseResult(
 // 3. Verifies that CI checked the exact final head.
 // 4. Publishes and returns the final WorkAttestation.
 func (m *WorkGenerationManager) AssertAcceptance(ctx context.Context, finalHeadSHA string, ciChecksGreen bool) (*types.WorkAttestation, error) {
+	ciIdentity := ""
+	if ciChecksGreen {
+		ciIdentity = "ci_checks_green"
+	}
+	return m.AssertAcceptanceWithCIEvidence(ctx, finalHeadSHA, ciIdentity)
+}
+
+func (m *WorkGenerationManager) AssertAcceptanceWithCIEvidence(ctx context.Context, finalHeadSHA, ciCheckIdentity string) (*types.WorkAttestation, error) {
 	m.mu.Lock()
 	locked := true
 	defer func() {
@@ -536,6 +570,16 @@ func (m *WorkGenerationManager) AssertAcceptance(ctx context.Context, finalHeadS
 		finalTreeSHA = currentGen.GitTreeSHA
 	}
 
+	ciCheckIdentity = strings.TrimSpace(ciCheckIdentity)
+	if ciCheckIdentity == "" {
+		return nil, fmt.Errorf("terminal acceptance refused: missing CI evidence identity")
+	}
+	switch ciCheckIdentity {
+	case "ci_checks_green", "ci_approval_override", "declared_no_ci", "ci_not_required":
+	default:
+		return nil, fmt.Errorf("terminal acceptance refused: unsupported CI evidence identity %q", ciCheckIdentity)
+	}
+
 	envelopeDigest := types.ComputeEnvelopeDigest(currentGen.GenerationDigest, finalHeadSHA, finalTreeSHA)
 
 	var summaries []types.WorkPhaseResultSummary
@@ -570,7 +614,7 @@ func (m *WorkGenerationManager) AssertAcceptance(ctx context.Context, finalHeadS
 		PhaseResults:        summaries,
 		EvidenceIdentities:  evidenceMap,
 		CIHeadSHA:           finalHeadSHA,
-		CICheckIdentity:     "ci_checks_green",
+		CICheckIdentity:     ciCheckIdentity,
 		CreatedAt:           time.Now().Unix(),
 	}
 	att.AttestationDigest = types.ComputeAttestationDigest(att)
@@ -869,8 +913,9 @@ func (m *WorkGenerationManager) matchesSelectedInputs(file string) bool {
 }
 
 func (m *WorkGenerationManager) isProtectedExclusion(file string) bool {
+	file = strings.ToLower(file)
 	for _, pat := range m.plan.ProtectedExclusions {
-		if matchPattern(file, pat) {
+		if matchPattern(file, strings.ToLower(pat)) {
 			return true
 		}
 	}
@@ -887,6 +932,18 @@ func (m *WorkGenerationManager) isPathAllowed(file string, allowedPatterns []str
 		}
 	}
 	return false
+}
+
+func sameSnapshotHashes(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if b[k] != v {
+			return false
+		}
+	}
+	return true
 }
 
 func matchPattern(file, pattern string) bool {
