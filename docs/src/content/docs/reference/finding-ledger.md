@@ -64,8 +64,8 @@ Matching is deliberately conservative. An exact content match pairs first. A fin
 
 | Status | Meaning |
 | --- | --- |
-| `open` | Admitted and not yet selected or disposed of. Blocking. |
-| `pending_verification` | Selected for correction; a correction revision is recorded. Blocking. |
+| `open` | Admitted and not yet selected or disposed of. Blocking when `is_blocking` is true. |
+| `pending_verification` | Selected for correction, or added by the operator as part of a fix request; it remains unresolved until a closure proof is recorded. Blocking when `is_blocking` is true. |
 | `needs_reconciliation` | Imported from pre-ledger history whose outcome cannot be proven. Blocking. |
 | `closed_verified` | Proven fixed by a closure proof (see below). |
 | `closed_accepted` | Explicit operator acceptance or approval, with provenance and reason. |
@@ -76,15 +76,15 @@ Only `closed_verified` counts as fixed in `no-mistakes stats`. An accepted excep
 
 ## Transitions
 
-The ledger is append-only in spirit: every transition is recorded as an event with the state before and after, the round, the step result, and any commit or session that justifies it.
+The ledger is append-only in spirit: every transition is recorded as an event with the state before and after, the round, the step result, and any commit or session that justifies it. The entry state change and its event are committed together; if either write fails, the step fails closed instead of publishing a partial transition.
 
 | Event | Transition |
 | --- | --- |
-| `admitted` | — → `open` |
+| `admitted` | — → `open` for analyzer-reported findings, or — → `pending_verification` for operator-added fix findings |
 | `reported_again` | an entry re-reported by a later round; `pending_verification` returns to `open` and its correction evidence is discarded |
 | `not_rediscovered` | an unresolved entry omitted by a round; the status does not change |
 | `selected_for_correction` | `open` → `pending_verification` |
-| `correction_revision_recorded` | stamps the revision and the fixing session a selected correction produced |
+| `correction_revision_recorded` | stamps the revision and the fixing session a selected correction produced; the status does not change |
 | `closure_reviewed` | `pending_verification` → `closed_verified` |
 | `accepted` / `not_applicable` / `superseded` | explicit disposition with provenance and reason |
 | `needs_reconciliation` | `open` → `needs_reconciliation` on import |
@@ -93,7 +93,7 @@ The ledger is append-only in spirit: every transition is recorded as an event wi
 
 Each round is unioned with every unresolved entry. A later empty or partial round cannot close an earlier blocking finding: an omission records `not_rediscovered` and changes nothing.
 
-Selecting a subset for correction moves exactly those entries to `pending_verification`. Every unselected entry stays `open` and blocking. There is no "empty selection means everything" rule — an implicit select-all would silently widen what one fix response authorizes.
+Selecting a subset for correction moves exactly those entries to `pending_verification`. Every unselected entry stays `open` and unresolved. There is no "empty selection means everything" rule — an implicit select-all would silently widen what one fix response authorizes.
 
 ### Verified closure
 
@@ -121,13 +121,13 @@ They keep their existing owner and are deliberately **not** admitted to the ledg
 
 ## Terminal acceptance
 
-A run is refused a clean completion while any entry is unresolved:
+A run is refused a clean completion for any unresolved ledger state that would otherwise certify the run without proof:
 
 - any blocking entry is `open`
 - any entry is `pending_verification` without closure evidence
 - any entry `needs_reconciliation`
 
-The executor also parks a step whose unresolved ledger set is non-empty even when the entries are not blocking by severity, so an unresolved entry reaches a gate for a decision instead of dead-ending the run at terminal acceptance.
+The executor also parks a step whose unresolved ledger set is non-empty even when the entries are not blocking by severity, so an unresolved nonblocking entry reaches a gate for a decision instead of dead-ending the run at terminal acceptance.
 
 ## Legacy runs
 
