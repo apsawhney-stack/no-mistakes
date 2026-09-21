@@ -103,6 +103,12 @@ func (r *ValidationPlanRaw) ToValidationPlan(cfg *Config) types.ValidationPlan {
 	if _, ok := writeSets["review_fix"]; !ok {
 		writeSets["review_fix"] = []string{"**/*"}
 	}
+	if _, ok := writeSets["lint"]; !ok {
+		writeSets["lint"] = []string{"**/*"}
+	}
+	if _, ok := writeSets["lint_fix"]; !ok {
+		writeSets["lint_fix"] = []string{"**/*"}
+	}
 	exclusions := defaultProtectedExclusions()
 	if len(r.ProtectedExclusions) > 0 {
 		exclusions = append(exclusions, r.ProtectedExclusions...)
@@ -153,7 +159,8 @@ func DefaultConservativeValidationPlan(cfg *Config) types.ValidationPlan {
 		"review_fix": {"**/*"},
 		"test":       {},
 		"document":   {"docs/**", "*.md", "README*"},
-		"lint":       {},
+		"lint":       {"**/*"},
+		"lint_fix":   {"**/*"},
 		"push":       {},
 		"pr":         {},
 		"ci":         {},

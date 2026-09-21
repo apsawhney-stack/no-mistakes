@@ -772,10 +772,13 @@ func (m *WorkGenerationManager) scanWorkTreeHashesLocked() (map[string]string, e
 
 	err := filepath.WalkDir(m.workDir, func(p string, d os.DirEntry, err error) error {
 		if err != nil {
-			return nil
+			return err
 		}
 		rel, err := filepath.Rel(m.workDir, p)
-		if err != nil || rel == "." {
+		if err != nil {
+			return err
+		}
+		if rel == "." {
 			return nil
 		}
 		relSlash := filepath.ToSlash(rel)
@@ -794,7 +797,7 @@ func (m *WorkGenerationManager) scanWorkTreeHashesLocked() (map[string]string, e
 
 		fi, err := os.Lstat(p)
 		if err != nil {
-			return nil
+			return fmt.Errorf("stat %s: %w", relSlash, err)
 		}
 
 		mode := fi.Mode()
@@ -802,16 +805,21 @@ func (m *WorkGenerationManager) scanWorkTreeHashesLocked() (map[string]string, e
 		case mode.IsRegular():
 			f, err := os.Open(p)
 			if err != nil {
-				return nil
+				return fmt.Errorf("open %s: %w", relSlash, err)
 			}
-			defer f.Close()
 			h := sha256.New()
-			_, _ = io.Copy(h, f)
+			if _, err := io.Copy(h, f); err != nil {
+				_ = f.Close()
+				return fmt.Errorf("hash %s: %w", relSlash, err)
+			}
+			if err := f.Close(); err != nil {
+				return fmt.Errorf("close %s: %w", relSlash, err)
+			}
 			hashes[relSlash] = fmt.Sprintf("regular:%o:%d:%s", uint32(mode.Perm()), fi.Size(), hex.EncodeToString(h.Sum(nil)))
 		case mode&os.ModeSymlink != 0:
 			target, err := os.Readlink(p)
 			if err != nil {
-				return nil
+				return fmt.Errorf("read symlink %s: %w", relSlash, err)
 			}
 			h := sha256.Sum256([]byte(target))
 			hashes[relSlash] = fmt.Sprintf("symlink:%o:%d:%s", uint32(mode.Perm()), fi.Size(), hex.EncodeToString(h[:]))

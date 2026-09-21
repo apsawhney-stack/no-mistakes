@@ -237,6 +237,7 @@ func registerFinalAttestationRestamp(sctx *pipeline.StepContext, host scm.Host, 
 		policy := attestationPolicyFrom(sctx)
 		policy.WorkEnvelopeDigest = att.FinalEnvelopeDigest
 		policy.WorkAttestationDigest = att.AttestationDigest
+		policy.WorkAttestation = att
 		return restampPRAttestationWithSteps(ctx, host, &copied, att.FinalHeadSHA, steps, sctx.Log, policy)
 	})
 }
@@ -627,6 +628,7 @@ func (s *PRStep) buildPipelineSectionFor(sctx *pipeline.StepContext, provider sc
 		if att, err := sctx.WorkGenManager.Attestation(stepCtx); err == nil && att != nil {
 			policy.WorkEnvelopeDigest = att.FinalEnvelopeDigest
 			policy.WorkAttestationDigest = att.AttestationDigest
+			policy.WorkAttestation = att
 		}
 	}
 	pipelineMD, riskLine = buildPipelineSummaryFor(steps, rounds, sctx.Run.HeadSHA, provider, policy)

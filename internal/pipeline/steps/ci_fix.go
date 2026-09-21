@@ -844,6 +844,7 @@ func attestationPolicyFrom(sctx *pipeline.StepContext) pipelineAttestationPolicy
 		if att, err := sctx.WorkGenManager.Attestation(context.Background()); err == nil && att != nil {
 			policy.WorkEnvelopeDigest = att.FinalEnvelopeDigest
 			policy.WorkAttestationDigest = att.AttestationDigest
+			policy.WorkAttestation = att
 		}
 	}
 	return policy
