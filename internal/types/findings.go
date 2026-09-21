@@ -132,6 +132,11 @@ const FindingIDProtectedPathRefusal = "protected-path-refusal"
 // product defect; the operator decides whether to spend another budget.
 const FindingIDCIFixAgentTimeout = "ci-fix-agent-timeout"
 
+// FindingIDTestAgentNewTestFile is the Test-step note for a regression test file
+// the evidence agent wrote while validating the change. It is informational
+// live state, not a defect requiring durable disposition.
+const FindingIDTestAgentNewTestFile = "test-agent-new-test-file"
+
 // stepOwnedFindingIDs are the finding identities a pipeline step synthesizes
 // from live state on every round, rather than reporting them as claims about
 // the change under validation.
@@ -140,6 +145,7 @@ var stepOwnedFindingIDs = []string{
 	FindingIDTestAgentUnvalidatedWork,
 	FindingIDProtectedPathRefusal,
 	FindingIDCIFixAgentTimeout,
+	FindingIDTestAgentNewTestFile,
 }
 
 // IsStepOwnedFinding reports whether f is an operator-decision park that its

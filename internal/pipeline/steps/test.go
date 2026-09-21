@@ -271,6 +271,7 @@ Rules:
 	newTests := mergeNewTestFiles(newTestsFromFix, detectNewTestFiles(ctx, sctx.WorkDir))
 	for _, f := range newTests {
 		findings.Items = append(findings.Items, Finding{
+			ID:          types.FindingIDTestAgentNewTestFile,
 			Severity:    "info",
 			Action:      types.ActionNoOp,
 			File:        f,

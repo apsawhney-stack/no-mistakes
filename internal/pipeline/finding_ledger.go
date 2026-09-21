@@ -663,11 +663,13 @@ func (l *FindingLedger) buildEffectiveFindingsJSON(stepName types.StepName, roun
 	if summary.TotalEntries > 0 {
 		result.Ledger = summary
 	}
-	switch {
-	case len(items) == 1:
-		result.Summary = "1 open finding"
-	case len(items) > 1:
-		result.Summary = fmt.Sprintf("%d open findings", len(items))
+	if strings.TrimSpace(result.Summary) == "" {
+		switch {
+		case len(items) == 1:
+			result.Summary = "1 open finding"
+		case len(items) > 1:
+			result.Summary = fmt.Sprintf("%d open findings", len(items))
+		}
 	}
 
 	return types.MarshalFindingsJSON(result)

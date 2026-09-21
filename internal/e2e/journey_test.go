@@ -269,7 +269,7 @@ func runHappyPath(t *testing.T, agentName string) {
 	// invocation whose prompt contains the review preamble; if missing
 	// the pipeline didn't reach review or routed it elsewhere.
 	assertNoUnexpectedAutofixCommits(t, run, featureHead)
-	assertReviewStepInfoOnly(t, run.Steps)
+	assertReviewStepClean(t, run.Steps)
 	assertReviewPrompt(t, h, run, invs)
 	assertDocumentPrompt(t, h, run, invs)
 	assertDocumentStepNoGaps(t, run.Steps)
@@ -401,7 +401,7 @@ func cleanReviewScenario(t *testing.T) string {
       risk_level: low
       risk_rationale: "documentation status only"
       risk_scope: source-or-external
-  - match: "branch: document-info"
+  - match: "report only what you could not resolve.\n\nContext:\n- branch: document-info"
     text: "documentation info finding"
     structured:
       findings:
@@ -535,17 +535,10 @@ func cleanReviewScenario(t *testing.T) string {
     text: "looks good"
     delay_ms: 1500
     structured:
-      findings:
-        - id: "review-info"
-          severity: info
-          file: "hello.txt"
-          line: 1
-          description: "looks good"
-          action: no-op
-          review_scope: source
-      summary: "no blocking issues"
+      findings: []
+      summary: "no issues found"
       risk_level: low
-      risk_rationale: "informational finding only"
+      risk_rationale: "no risks detected in the diff"
       risk_scope: source-or-external
       tested:
         - "fakeagent: simulated review"
@@ -560,17 +553,10 @@ func cleanReviewScenario(t *testing.T) string {
   - match: "Review the code changes and return structured findings"
     text: "looks good"
     structured:
-      findings:
-        - id: "review-info"
-          severity: info
-          file: "hello.txt"
-          line: 1
-          description: "looks good"
-          action: no-op
-          review_scope: source
-      summary: "no blocking issues"
+      findings: []
+      summary: "no issues found"
       risk_level: low
-      risk_rationale: "informational finding only"
+      risk_rationale: "no risks detected in the diff"
       risk_scope: source-or-external
       tested:
         - "fakeagent: simulated review"
@@ -2776,7 +2762,7 @@ func assertReviewPrompt(t *testing.T, h *Harness, run *ipc.RunInfo, invs []Invoc
 	}
 }
 
-func assertReviewStepInfoOnly(t *testing.T, steps []ipc.StepResultInfo) {
+func assertReviewStepClean(t *testing.T, steps []ipc.StepResultInfo) {
 	t.Helper()
 	step, ok := findStep(steps, types.StepReview)
 	if !ok {
@@ -2789,11 +2775,8 @@ func assertReviewStepInfoOnly(t *testing.T, steps []ipc.StepResultInfo) {
 	if err != nil {
 		t.Fatalf("parse review step findings: %v", err)
 	}
-	if len(findings.Items) != 1 {
-		t.Fatalf("expected one informational review finding, got %+v", findings.Items)
-	}
-	if findings.Items[0].Severity != "info" {
-		t.Fatalf("expected informational review finding to be non-blocking, got severity %q", findings.Items[0].Severity)
+	if len(findings.Items) != 0 {
+		t.Fatalf("expected clean review findings, got %+v", findings.Items)
 	}
 	if findings.RiskLevel != "low" {
 		t.Fatalf("expected low review risk, got %q", findings.RiskLevel)
