@@ -92,6 +92,10 @@ type StepContext struct {
 	// OnPRMerged is a best-effort hook after a merged PR state is persisted.
 	// Eval uses it to relabel auto-fix/shipped-unfixed gold; nil is a no-op.
 	OnPRMerged func(ctx context.Context, runID string)
+	// FindingLedger manages the durable per-run finding ledger.
+	FindingLedger *FindingLedger
+	// FixSessionID records the agent session ID that applied the fix.
+	FixSessionID string
 }
 
 // RunAgentSession executes one turn of a durable review-loop role session,

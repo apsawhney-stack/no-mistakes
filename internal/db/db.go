@@ -40,7 +40,12 @@ func Open(path string) (*DB, error) {
 			return nil, fmt.Errorf("migrate db: %w", err)
 		}
 	}
-	return &DB{sql: sqlDB}, nil
+	dbInst := &DB{sql: sqlDB}
+	if err := dbInst.migrateLegacyFindingLedger(); err != nil {
+		sqlDB.Close()
+		return nil, fmt.Errorf("migrate finding ledger: %w", err)
+	}
+	return dbInst, nil
 }
 
 // OpenReadOnly opens an existing database without creating or migrating it.
@@ -75,6 +80,11 @@ func isDuplicateColumnErr(err error) bool {
 // Close closes the database connection.
 func (d *DB) Close() error {
 	return d.sql.Close()
+}
+
+// NewID generates a new ULID with monotonic ordering.
+func NewID() string {
+	return newID()
 }
 
 // newID generates a new ULID with monotonic ordering.

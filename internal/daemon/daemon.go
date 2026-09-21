@@ -1471,6 +1471,9 @@ func runToInfo(d *db.DB, r *db.Run, steps []*db.StepResult) *ipc.RunInfo {
 			}
 		}
 	}
+	if summary, err := d.GetFindingLedgerSummary(r.ID); err == nil && summary != nil && summary.TotalEntries > 0 {
+		info.FindingLedger = summary
+	}
 	return info
 }
 
@@ -1517,6 +1520,11 @@ func stepToInfo(d *db.DB, s *db.StepResult) ipc.StepResultInfo {
 		info.RoundCount = rounds.TotalRounds
 		info.FixRoundCount = rounds.FixRounds
 		info.PendingFixSource = rounds.PendingFixSource
+	}
+	if s.FindingsJSON != nil && *s.FindingsJSON != "" {
+		if parsed, err := types.ParseFindingsJSON(*s.FindingsJSON); err == nil && parsed.Ledger != nil {
+			info.FindingLedger = parsed.Ledger
+		}
 	}
 	return info
 }

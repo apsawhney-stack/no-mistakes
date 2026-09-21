@@ -57,9 +57,10 @@ type Executor struct {
 
 	// sessions manages this run's durable review-loop agent sessions; shared
 	// carries run-scoped step-to-step results. Both are created per Execute.
-	sessions *RunSessions
-	shared   *RunShared
-	workDir  string
+	sessions      *RunSessions
+	shared        *RunShared
+	findingLedger *FindingLedger
+	workDir       string
 
 	mu                     sync.Mutex
 	approvalCh             chan approvalResponse // buffered channel for approval responses
@@ -224,7 +225,7 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 		return e.failRun(run, repo, fmt.Errorf("create log dir: %w", err))
 	}
 
-	e.initializeRunScopes(run.ID)
+	e.initializeRunScopes(run.ID, repo.ID)
 
 	// Create step result records in DB
 	stepRecords := make(map[types.StepName]*db.StepResult)
@@ -314,10 +315,17 @@ func (e *Executor) prepareRestart(runID string, name types.StepName, currentInde
 	return index, nil
 }
 
-func (e *Executor) initializeRunScopes(runID string) {
+func (e *Executor) initializeRunScopes(runID string, repoIDs ...string) {
 	sessionsEnabled := e.config != nil && e.config.SessionReuse && e.agent != nil
 	e.sessions = NewRunSessions(e.db, runID, e.agent, sessionsEnabled)
 	e.shared = &RunShared{}
+	repoID := ""
+	if len(repoIDs) > 0 {
+		repoID = repoIDs[0]
+	}
+	if e.db != nil {
+		e.findingLedger = NewFindingLedger(e.db, runID, repoID)
+	}
 }
 
 type stepExecutionState struct {
@@ -401,7 +409,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
 		return e.failRun(run, repo, fmt.Errorf("create log dir: %w", err))
 	}
-	e.initializeRunScopes(run.ID)
+	e.initializeRunScopes(run.ID, repo.ID)
 
 	parkStart := time.Unix(*run.AwaitingAgentSince, 0)
 	duration := recoveredStepDuration(gate.stepResult)
@@ -448,6 +456,9 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		OnPRMerged: e.onPRMerged,
 	}
 	if reconciled, reconcileErr := e.reconcileApprovalGate(ctx, gate.step, reconcileCtx, gate.findings); reconciled {
+		if e.findingLedger != nil {
+			_ = e.findingLedger.ProcessExplicitDisposition(ctx, gate.step.Name(), gate.stepResult.ID, gate.round, types.ActionApprove, "approval gate reconciled externally", "gate_reconciled")
+		}
 		if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
 			return e.failRun(run, repo, fmt.Errorf("complete reconciled awaiting-agent state: %w", dbErr), ctx)
 		}
@@ -494,6 +505,9 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		return e.failRun(run, repo, fmt.Errorf("step %s: waiting for approval: %w", gate.step.Name(), err), ctx)
 	}
 	if reconciled {
+		if e.findingLedger != nil {
+			_ = e.findingLedger.ProcessExplicitDisposition(ctx, gate.step.Name(), gate.stepResult.ID, gate.round, types.ActionApprove, "approval gate reconciled externally", "gate_reconciled")
+		}
 		return completeReconciledGate()
 	}
 
@@ -512,6 +526,9 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	switch response.action {
 	case types.ActionApprove:
 		e.recordDeclinedRound(gate.lastRoundID, gate.findings, gate.step.Name(), gate.round)
+		if e.findingLedger != nil {
+			_ = e.findingLedger.ProcessExplicitDisposition(ctx, gate.step.Name(), gate.stepResult.ID, gate.round, types.ActionApprove, response.approvalReason, "user_approval")
+		}
 		if err := e.applyApprovalOverride(gate.step, reconcileCtx, gate.stepResult.ID, response.approvalReason); err != nil {
 			return e.failRun(run, repo, err, ctx)
 		}
@@ -522,6 +539,9 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, gate.index+1, false)
 	case types.ActionSkip:
 		e.recordDeclinedRound(gate.lastRoundID, gate.findings, gate.step.Name(), gate.round)
+		if e.findingLedger != nil {
+			_ = e.findingLedger.ProcessExplicitDisposition(ctx, gate.step.Name(), gate.stepResult.ID, gate.round, types.ActionSkip, "step skipped by user", "user_skip")
+		}
 		if err := e.db.CompleteStepWithStatus(gate.stepResult.ID, types.StepStatusSkipped, recoveredExitCode(gate.stepResult), duration, recoveredLogPath(gate.stepResult)); err != nil {
 			return e.failRun(run, repo, fmt.Errorf("skip recovered step %s: %w", gate.step.Name(), err), ctx)
 		}
@@ -554,8 +574,27 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 			newSelectedIDs := combineSelectedFindingIDs(response.findingIDs, selectedForPersistence)
 			selectedOutstandingIDs = combineFindingIDLists(gate.selectedOutstandingIDs, newSelectedIDs)
 		}
+		allSelectedIDs := combineSelectedFindingIDs(response.findingIDs, selectedForPersistence)
+		if len(allSelectedIDs) == 0 && len(response.addedFindings) == 0 {
+			allSelectedIDs = extractFindingIDs(gate.findings)
+		}
+		if e.findingLedger != nil {
+			if len(response.addedFindings) > 0 {
+				if parsedMerged, parseErr := types.ParseFindingsJSON(merged); parseErr == nil {
+					var userAdded []types.Finding
+					for _, it := range parsedMerged.Items {
+						if it.Source == types.FindingSourceUser {
+							userAdded = append(userAdded, it)
+						}
+					}
+					if len(userAdded) > 0 {
+						_ = e.findingLedger.AdmitUserFindings(ctx, gate.step.Name(), gate.stepResult.ID, gate.round, userAdded)
+					}
+				}
+			}
+			_ = e.findingLedger.ProcessSelection(ctx, gate.step.Name(), gate.stepResult.ID, gate.round, allSelectedIDs, "user")
+		}
 		if gate.lastRoundID != "" {
-			allSelectedIDs := combineSelectedFindingIDs(response.findingIDs, selectedForPersistence)
 			if idsJSON := marshalFindingIDs(allSelectedIDs); idsJSON != "" {
 				var userFindingsJSON *string
 				if merged != "" && merged != selected {
@@ -969,6 +1008,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		CIReadinessChanged: ciReadinessChanged,
 		MarkRunning:        markRunning,
 		OnPRMerged:         e.onPRMerged,
+		FindingLedger:      e.findingLedger,
 	}
 	if stepName == types.StepReview {
 		BindUncertifiedPipelineRange(sctx)
@@ -1030,7 +1070,29 @@ rounds:
 		// the gate, the persisted findings, and the stats all decide on.
 		roundFindings := outcome.Findings
 		effectiveFindings := roundFindings
-		if carryFindings {
+		if e.findingLedger != nil {
+			if sctx.Fixing && run.HeadSHA != "" {
+				_ = e.findingLedger.RecordCorrectingRevision(ctx, stepName, roundNum, run.HeadSHA, sctx.FixSessionID)
+			}
+			var ledgerErr error
+			effectiveFindings, ledgerErr = e.findingLedger.ProcessRoundFindings(
+				ctx,
+				stepName,
+				sr.ID,
+				roundNum,
+				outcome,
+				sctx.Fixing,
+				run.HeadSHA,
+				sctx.FixSessionID,
+			)
+			if ledgerErr != nil {
+				slog.Warn("failed to process round findings in finding ledger", "step", stepName, "error", ledgerErr)
+				effectiveFindings = roundFindings
+			}
+			if carryFindings {
+				outstandingFindings = effectiveFindings
+			}
+		} else if carryFindings {
 			// This round is the verification round for the selection the
 			// previous round dispatched: a selected item leaves the outstanding
 			// set only on a positive coverage record that also no longer reports
@@ -1118,6 +1180,9 @@ rounds:
 				sctx.Fixing = true
 				sctx.PreviousFindings = fixableFindings
 				sctx.DeferredFindings = removeMatchingFindingsJSON(effectiveFindings, fixableFindings)
+				if e.findingLedger != nil {
+					_ = e.findingLedger.ProcessSelection(ctx, stepName, sr.ID, roundNum, findingIDList(fixableFindings), "auto_fix")
+				}
 				if carryFindings {
 					pendingVerificationIDs = combineFindingIDLists(pendingVerificationIDs, findingIDList(fixableFindings))
 					selectedOutstandingIDs = combineFindingIDLists(selectedOutstandingIDs, findingIDList(fixableFindings))
@@ -1191,6 +1256,9 @@ rounds:
 				return false, "", fmt.Errorf("step %s: waiting for approval: %w", stepName, err)
 			}
 			if reconciled {
+				if e.findingLedger != nil {
+					_ = e.findingLedger.ProcessExplicitDisposition(ctx, stepName, sr.ID, roundNum, types.ActionApprove, "approval gate reconciled externally", "gate_reconciled")
+				}
 				phaseStart = time.Now()
 				goto done
 			}
@@ -1213,6 +1281,9 @@ rounds:
 				// Approved - execution already frozen in executionMS, reset phaseStart
 				// so the done label computes no additional elapsed.
 				e.recordDeclinedRound(currentRoundID, effectiveFindings, stepName, roundNum)
+				if e.findingLedger != nil {
+					_ = e.findingLedger.ProcessExplicitDisposition(ctx, stepName, sr.ID, roundNum, types.ActionApprove, response.approvalReason, "user_approval")
+				}
 				if err := e.applyApprovalOverride(step, sctx, sr.ID, response.approvalReason); err != nil {
 					return false, "", err
 				}
@@ -1222,6 +1293,9 @@ rounds:
 			case types.ActionSkip:
 				// Skip - mark step skipped and return (not an error)
 				e.recordDeclinedRound(currentRoundID, effectiveFindings, stepName, roundNum)
+				if e.findingLedger != nil {
+					_ = e.findingLedger.ProcessExplicitDisposition(ctx, stepName, sr.ID, roundNum, types.ActionSkip, "step skipped by user", "user_skip")
+				}
 				if err := e.db.CompleteStepWithStatus(sr.ID, types.StepStatusSkipped, finalExitCode, executionMS, logPath); err != nil {
 					return false, "", fmt.Errorf("complete step %s (skip): %w", stepName, err)
 				}
@@ -1264,9 +1338,28 @@ rounds:
 					pendingVerificationIDs = combineFindingIDLists(pendingVerificationIDs, newPendingIDs)
 					selectedOutstandingIDs = combineFindingIDLists(selectedOutstandingIDs, newPendingIDs)
 				}
+				allSelectedIDs := combineSelectedFindingIDs(response.findingIDs, selectedForPersistence)
+				if len(allSelectedIDs) == 0 && len(response.addedFindings) == 0 {
+					allSelectedIDs = extractFindingIDs(effectiveFindings)
+				}
+				if e.findingLedger != nil {
+					if len(response.addedFindings) > 0 {
+						if parsedMerged, parseErr := types.ParseFindingsJSON(mergedFindings); parseErr == nil {
+							var userAdded []types.Finding
+							for _, it := range parsedMerged.Items {
+								if it.Source == types.FindingSourceUser {
+									userAdded = append(userAdded, it)
+								}
+							}
+							if len(userAdded) > 0 {
+								_ = e.findingLedger.AdmitUserFindings(ctx, stepName, sr.ID, roundNum, userAdded)
+							}
+						}
+					}
+					_ = e.findingLedger.ProcessSelection(ctx, stepName, sr.ID, roundNum, allSelectedIDs, "user")
+				}
 				nextTrigger = "auto_fix"
 				if currentRoundID != "" {
-					allSelectedIDs := combineSelectedFindingIDs(response.findingIDs, selectedForPersistence)
 					if idsJSON := marshalFindingIDs(allSelectedIDs); idsJSON != "" {
 						var userFindingsJSON *string
 						if mergedFindings != "" && mergedFindings != selectedFindings {
@@ -1651,6 +1744,11 @@ func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 }
 
 func (e *Executor) completeRun(run *db.Run, repo *db.Repo) error {
+	if e.findingLedger != nil {
+		if err := e.findingLedger.AssertAcceptance(context.Background()); err != nil {
+			return err
+		}
+	}
 	verifiedHead, verified := e.reconcileTerminalRunHead(run)
 	var err error
 	if verified {

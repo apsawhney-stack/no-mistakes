@@ -108,11 +108,10 @@ func (d *DB) aggregateRunStats(runID string, stepStats map[types.StepName]*StepS
 	runReported := 0
 	runFixed := 0
 	for _, step := range steps {
-		rounds, err := d.GetRoundsByStep(step.ID)
+		findingStats, err := d.StepFindingStats(step)
 		if err != nil {
 			return 0, 0, err
 		}
-		findingStats := stepFindingStats(step, rounds)
 		reported, fixed := findingStats.ReportedFindings, findingStats.FixedFindings
 
 		runReported += reported
@@ -173,7 +172,23 @@ func (d *DB) FixedFindingsByStep(step *StepResult) (int, error) {
 }
 
 // StepFindingStats returns reported and fixed finding counts for a single step.
+// When finding ledger entries exist, fixed findings are strictly verified code
+// fixes (closed_verified), not explicit operator approvals or waivers.
 func (d *DB) StepFindingStats(step *StepResult) (StepStats, error) {
+	stats := StepStats{StepName: step.StepName}
+	entries, err := d.GetFindingLedgerEntriesByStep(step.RunID, step.StepName)
+	if err == nil && len(entries) > 0 {
+		for _, e := range entries {
+			if e.ReportedID == types.FindingIDTestAgentTimeout || e.ReportedID == types.FindingIDTestAgentUnvalidatedWork {
+				continue
+			}
+			stats.ReportedFindings++
+			if e.Status == types.FindingLedgerStatusClosedVerified {
+				stats.FixedFindings++
+			}
+		}
+		return stats, nil
+	}
 	rounds, err := d.GetRoundsByStep(step.ID)
 	if err != nil {
 		return StepStats{}, err

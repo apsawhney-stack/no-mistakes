@@ -3,6 +3,7 @@ package types
 import (
 	"encoding/json"
 	"fmt"
+	"path"
 	"slices"
 	"strings"
 )
@@ -200,6 +201,8 @@ type Finding struct {
 	// every non-CI finding.
 	Check   string `json:"check,omitempty"`
 	CheckID string `json:"check_id,omitempty"`
+	// LedgerID is the immutable per-run finding ledger entry identity.
+	LedgerID string `json:"ledger_id,omitempty"`
 }
 
 // TestScenario is one named end-to-end scenario the test step derived from the
@@ -271,6 +274,7 @@ type findingWire struct {
 	Category            string `json:"category,omitempty"`
 	Check               string `json:"check,omitempty"`
 	CheckID             string `json:"check_id,omitempty"`
+	LedgerID            string `json:"ledger_id,omitempty"`
 	RequiresHumanReview *bool  `json:"requires_human_review,omitempty"`
 }
 
@@ -308,28 +312,30 @@ type Findings struct {
 	// UnvalidatedSinceSHA is set only on a Test budget-cut park: the head its
 	// unvalidated-work check measured from, carried so a repeated cut before any
 	// evidence turn completes re-measures from that same head.
-	UnvalidatedSinceSHA string `json:"unvalidated_since_sha,omitempty"`
-	RiskLevel           string `json:"risk_level"`
-	RiskRationale       string `json:"risk_rationale"`
-	RiskScope           string `json:"risk_scope,omitempty"`
+	UnvalidatedSinceSHA string                `json:"unvalidated_since_sha,omitempty"`
+	RiskLevel           string                `json:"risk_level"`
+	RiskRationale       string                `json:"risk_rationale"`
+	RiskScope           string                `json:"risk_scope,omitempty"`
+	Ledger              *FindingLedgerSummary `json:"ledger,omitempty"`
 }
 
 type findingsWire struct {
-	DecisionReviews     []DecisionReview `json:"decision_reviews"`
-	Items               []Finding        `json:"findings"`
-	Legacy              []Finding        `json:"items"`
-	Summary             string           `json:"summary"`
-	ReviewedPaths       []string         `json:"reviewed_paths"`
-	Tested              []string         `json:"tested"`
-	TestingSummary      string           `json:"testing_summary"`
-	Artifacts           []TestArtifact   `json:"artifacts"`
-	Scenarios           []TestScenario   `json:"scenarios"`
-	Verdict             string           `json:"verdict"`
-	TestedHeadSHA       string           `json:"tested_head_sha"`
-	UnvalidatedSinceSHA string           `json:"unvalidated_since_sha"`
-	RiskLevel           string           `json:"risk_level"`
-	RiskRationale       string           `json:"risk_rationale"`
-	RiskScope           string           `json:"risk_scope"`
+	DecisionReviews     []DecisionReview      `json:"decision_reviews"`
+	Items               []Finding             `json:"findings"`
+	Legacy              []Finding             `json:"items"`
+	Summary             string                `json:"summary"`
+	ReviewedPaths       []string              `json:"reviewed_paths"`
+	Tested              []string              `json:"tested"`
+	TestingSummary      string                `json:"testing_summary"`
+	Artifacts           []TestArtifact        `json:"artifacts"`
+	Scenarios           []TestScenario        `json:"scenarios"`
+	Verdict             string                `json:"verdict"`
+	TestedHeadSHA       string                `json:"tested_head_sha"`
+	UnvalidatedSinceSHA string                `json:"unvalidated_since_sha"`
+	RiskLevel           string                `json:"risk_level"`
+	RiskRationale       string                `json:"risk_rationale"`
+	RiskScope           string                `json:"risk_scope"`
+	Ledger              *FindingLedgerSummary `json:"ledger"`
 }
 
 // ParseFindingsJSON decodes findings JSON, accepting current and legacy item
@@ -358,6 +364,7 @@ func ParseFindingsJSON(raw string) (Findings, error) {
 		RiskLevel:           wire.RiskLevel,
 		RiskRationale:       wire.RiskRationale,
 		RiskScope:           wire.RiskScope,
+		Ledger:              wire.Ledger,
 	}, nil
 }
 
@@ -596,6 +603,7 @@ func (f *Finding) UnmarshalJSON(data []byte) error {
 	f.Category = wire.Category
 	f.Check = wire.Check
 	f.CheckID = wire.CheckID
+	f.LedgerID = wire.LedgerID
 	if f.Action == "" && wire.RequiresHumanReview != nil {
 		if *wire.RequiresHumanReview {
 			f.Action = ActionAskUser
@@ -619,4 +627,45 @@ func (f Finding) ActionOrDefault() string {
 		return ActionAskUser
 	}
 	return f.Action
+}
+
+// IsBlockingFinding reports whether a finding is blocking. Error and warning
+// findings, as well as any finding with action ask-user or auto-fix, are
+// blocking; only informational no-op findings are non-blocking.
+func IsBlockingFinding(f Finding) bool {
+	sev := NormalizeFindingSeverity(f.Severity)
+	act := f.ActionOrDefault()
+	if sev == FindingSeverityError || sev == FindingSeverityWarning {
+		return true
+	}
+	if act == ActionAskUser || act == ActionAutoFix {
+		return true
+	}
+	return false
+}
+
+// NormalizeFingerprint returns a deterministic string fingerprint for matching
+// findings across rounds when line numbers shift or positional labels drift.
+// Line numbers, IDs, user instructions, and transient actions are excluded.
+func NormalizeFingerprint(f Finding) string {
+	if did := strings.TrimSpace(f.DecisionID); did != "" {
+		return fmt.Sprintf("did=%s", did)
+	}
+	normFile := strings.TrimSpace(f.File)
+	if normFile != "" {
+		normFile = path.Clean(normFile)
+		if normFile == "." {
+			normFile = ""
+		}
+	}
+	normDesc := strings.Join(strings.Fields(f.Description), " ")
+	return fmt.Sprintf("file=%s|desc=%s|sev=%s|cat=%s|chk=%s|cid=%s|scope=%s",
+		normFile,
+		normDesc,
+		NormalizeFindingSeverity(f.Severity),
+		strings.TrimSpace(f.Category),
+		strings.TrimSpace(f.Check),
+		strings.TrimSpace(f.CheckID),
+		strings.TrimSpace(f.ReviewScope),
+	)
 }
