@@ -1183,7 +1183,9 @@ rounds:
 		// levels (including "info") get a chance at automatic fixing.
 		if outcome.AutoFixable && autoFixLimit > 0 && autoFixAttempts < autoFixLimit {
 			fixableFindings := autoFixableFindingsJSON(roundFindings)
-			if carryFindings {
+			if e.findingLedger != nil {
+				fixableFindings = autoFixableFindingsJSON(effectiveFindings)
+			} else if carryFindings {
 				fixableFindings = remapFindingIDsJSON(effectiveFindings, fixableFindings)
 			}
 			if fixableFindings != "" {

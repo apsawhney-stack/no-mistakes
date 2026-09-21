@@ -174,6 +174,60 @@ func TestExecutor_PersistsEffectiveAutoFixLimit(t *testing.T) {
 	}
 }
 
+func TestExecutor_AutoFixSelectionUsesLedgerDisplayIDs(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+	calls := 0
+	step := &adaptiveCallStep{name: types.StepLint, fn: func(sctx *StepContext) (*StepOutcome, error) {
+		calls++
+		if calls == 1 {
+			return &StepOutcome{
+				NeedsApproval: true,
+				AutoFixable:   true,
+				Findings: `{"findings":[` +
+					`{"id":"lint-1","severity":"error","file":"a.go","line":1,"description":"first lint","action":"auto-fix"},` +
+					`{"id":"lint-1","severity":"error","file":"b.go","line":2,"description":"second lint","action":"auto-fix"}` +
+					`],"summary":"two lint findings"}`,
+			}, nil
+		}
+		selected, err := types.ParseFindingsJSON(sctx.PreviousFindings)
+		if err != nil {
+			t.Fatalf("parse selected findings: %v", err)
+		}
+		if len(selected.Items) != 2 {
+			t.Fatalf("selected findings = %+v, want both auto-fix findings", selected.Items)
+		}
+		ids := map[string]string{}
+		for _, item := range selected.Items {
+			ids[item.File] = item.ID
+		}
+		if ids["a.go"] != "lint-1" || ids["b.go"] != "lint-2" {
+			t.Fatalf("selected IDs = %+v, want ledger display IDs lint-1/lint-2", ids)
+		}
+		return &StepOutcome{ExitCode: 0}, nil
+	}}
+
+	exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{Lint: 1}}, nil, []Step{step}, nil)
+	if err := exec.Execute(context.Background(), run, repo, workDir); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("calls = %d, want initial plus auto-fix", calls)
+	}
+	entries, err := database.GetFindingLedgerEntriesByStep(run.ID, types.StepLint)
+	if err != nil {
+		t.Fatalf("ledger entries: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("entries = %+v, want two", entries)
+	}
+	for _, entry := range entries {
+		if entry.Status != types.FindingLedgerStatusClosedVerified {
+			t.Fatalf("entry %s (%s) status = %q, want closed_verified", entry.ReportedID, entry.File, entry.Status)
+		}
+	}
+}
+
 func TestExecutor_AutoFixRespectsMaxAttempts(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := t.TempDir()
