@@ -465,4 +465,15 @@ var migrationStatements = []string{
 	`CREATE INDEX IF NOT EXISTS idx_finding_ledger_events_entry ON finding_ledger_events (entry_id, created_at)`,
 	`CREATE INDEX IF NOT EXISTS idx_finding_ledger_events_run ON finding_ledger_events (run_id, created_at)`,
 	`ALTER TABLE finding_ledger_entries ADD COLUMN fix_session_id TEXT`,
+	// finding_ledger_migrations is the per-run import marker for pre-ledger
+	// history. Presence of ledger ENTRIES is not a safe marker: a process that
+	// dies partway through an import leaves entries behind, and "some entry
+	// exists" would then skip the rest of that run's history forever, silently
+	// certifying an incomplete import (see MigrateLegacyFindingLedgerForRun).
+	// The marker row is written in the same transaction as the import.
+	`CREATE TABLE IF NOT EXISTS finding_ledger_migrations (
+		run_id           TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+		protocol_version TEXT NOT NULL,
+		imported_at      INTEGER NOT NULL
+	)`,
 }

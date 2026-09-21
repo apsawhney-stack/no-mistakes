@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -59,6 +60,14 @@ func TestExecutor_AutoFixTriggersWithoutApproval(t *testing.T) {
 	}
 }
 
+// TestExecutor_AutoFixCarriesUnselectedFindingsSeparately pins the split between
+// the findings one auto-fix round hands the fixer and the ones it defers, and
+// pins that the deferred finding is still waiting at the gate afterwards.
+//
+// The step's rounds run on a goroutine and the resulting gate is driven,
+// because the deferred ask-user finding is not allowed to disappear: an
+// unselected entry stays open and blocking, so the run parks instead of
+// completing over it.
 func TestExecutor_AutoFixCarriesUnselectedFindingsSeparately(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := t.TempDir()
@@ -87,9 +96,53 @@ func TestExecutor_AutoFixCarriesUnselectedFindingsSeparately(t *testing.T) {
 	}}
 
 	exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{CI: 1}}, nil, []Step{step}, nil)
-	if err := exec.Execute(context.Background(), run, repo, workDir); err != nil {
-		t.Fatalf("Execute() error = %v", err)
+	done := make(chan error, 1)
+	go func() {
+		done <- exec.Execute(context.Background(), run, repo, workDir)
+	}()
+
+	// ci-1 is closed by the ledger's verified-closure path (the fix round
+	// re-ran clean on the corrected revision); ci-2 was never selected, so it
+	// must still be waiting for a decision at the gate.
+	waitForStepStatus(t, database, run.ID, types.StepCI, types.StepStatusFixReview)
+	sr := findingsStepResult(t, database, run.ID, types.StepCI)
+	if sr.FindingsJSON == nil {
+		t.Fatal("expected the parked gate to carry the unselected finding")
 	}
+	parked, err := types.ParseFindingsJSON(*sr.FindingsJSON)
+	if err != nil {
+		t.Fatalf("parse parked findings: %v", err)
+	}
+	if len(parked.Items) != 1 || parked.Items[0].ID != "ci-2" {
+		t.Fatalf("parked findings = %+v, want only the unselected ci-2", parked.Items)
+	}
+
+	if err := exec.Respond(types.StepCI, types.ActionApprove, nil); err != nil {
+		t.Fatalf("respond approve: %v", err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("executor timed out after approving the gate")
+	}
+}
+
+func findingsStepResult(t *testing.T, database *db.DB, runID string, name types.StepName) *db.StepResult {
+	t.Helper()
+	steps, err := database.GetStepsByRun(runID)
+	if err != nil {
+		t.Fatalf("get steps: %v", err)
+	}
+	for _, s := range steps {
+		if s.StepName == name {
+			return s
+		}
+	}
+	t.Fatalf("no step result for %s", name)
+	return nil
 }
 
 func TestExecutor_PersistsEffectiveAutoFixLimit(t *testing.T) {
@@ -519,5 +572,68 @@ func TestExecutor_ParkedStepReleasesLogFileAfterCancel(t *testing.T) {
 	// (run 31829193856). Cancel must close the log before cleanup.
 	if err := os.Remove(logPath); err != nil {
 		t.Fatalf("parked step must close lint.log on cancel so the worktree can be removed: %v", err)
+	}
+}
+
+// TestExecutor_LedgerParksANonBlockingUnresolvedEntry pins the terminal-acceptance
+// backstop: the ledger refuses a clean completion while any entry is unresolved,
+// including a non-blocking one that the severity checks would otherwise let
+// through, so the run reaches a gate instead of dead-ending in a failed run.
+func TestExecutor_LedgerParksANonBlockingUnresolvedEntry(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+
+	step := &adaptiveCallStep{name: types.StepReview, fn: func(sctx *StepContext) (*StepOutcome, error) {
+		return &StepOutcome{
+			// Non-blocking: informational and no-op, so the ordinary severity
+			// checks see nothing to park on.
+			Findings:        `{"findings":[{"id":"info-1","severity":"info","description":"nit","action":"no-op"}],"summary":"1 note"}`,
+			ReviewedPaths:   []string{"main.go"},
+			ReviewablePaths: []string{"main.go"},
+		}, nil
+	}}
+
+	exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
+	done := make(chan error, 1)
+	go func() { done <- exec.Execute(context.Background(), run, repo, workDir) }()
+
+	select {
+	case err := <-done:
+		t.Fatalf("run completed over an unresolved ledger entry: %v", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	// The entry is unresolved, so the ledger parked the step for a decision.
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("executor timed out after approving the ledger gate")
+	}
+
+	// The explicit acceptance is recorded as a disposition, never as a fix.
+	entries, err := database.GetFindingLedgerEntries(run.ID)
+	if err != nil {
+		t.Fatalf("ledger entries: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Status != types.FindingLedgerStatusClosedAccepted {
+		t.Fatalf("ledger entries = %+v, want one closed_accepted entry", entries)
+	}
+	if entries[0].DispositionProvenance == "" {
+		t.Fatal("accepted entry lost its disposition provenance")
+	}
+	sr := findingsStepResult(t, database, run.ID, types.StepReview)
+	stats, err := database.StepFindingStats(sr)
+	if err != nil {
+		t.Fatalf("stats: %v", err)
+	}
+	if stats.ReportedFindings != 1 || stats.FixedFindings != 0 {
+		t.Fatalf("stats = %+v, want 1 reported and 0 fixed (accepted is not a fix)", stats)
 	}
 }

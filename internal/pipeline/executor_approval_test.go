@@ -361,12 +361,16 @@ func TestExecutor_CustomGateTelemetryRedactsLabel(t *testing.T) {
 	defer restore()
 
 	callCount := 0
+	// The findings carry explicit IDs so the fix response can select exactly
+	// them. There is deliberately no "empty selection means everything"
+	// fallback: an unselected finding stays visible and blocking, so the drive
+	// below names its selection the way the TUI does.
 	step := &adaptiveCallStep{
 		name: stepName,
 		fn: func(sctx *StepContext) (*StepOutcome, error) {
 			callCount++
 			if callCount == 1 {
-				return &StepOutcome{NeedsApproval: true, Findings: `{"findings":[{"severity":"error","description":"bug one","action":"auto-fix"},{"severity":"warn","description":"bug two","action":"ask-user"}],"summary":"2 issues"}`}, nil
+				return &StepOutcome{NeedsApproval: true, Findings: `{"findings":[{"id":"g1","severity":"error","description":"bug one","action":"auto-fix"},{"id":"g2","severity":"warn","description":"bug two","action":"ask-user"}],"summary":"2 issues"}`}, nil
 			}
 			return &StepOutcome{ExitCode: 0}, nil
 		},
@@ -381,7 +385,7 @@ func TestExecutor_CustomGateTelemetryRedactsLabel(t *testing.T) {
 
 	waitForStepStatus(t, database, run.ID, stepName, types.StepStatusAwaitingApproval)
 
-	if err := exec.Respond(stepName, types.ActionFix, nil); err != nil {
+	if err := exec.Respond(stepName, types.ActionFix, []string{"g1", "g2"}); err != nil {
 		t.Fatalf("respond error: %v", err)
 	}
 

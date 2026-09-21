@@ -50,6 +50,7 @@ export default defineConfig({
             { label: "CLI Commands", slug: "reference/cli" },
             { label: "Evaluation toolkit", slug: "reference/eval" },
             { label: "Pipeline Steps", slug: "reference/pipeline-steps" },
+            { label: "Finding Ledger Protocol", slug: "reference/finding-ledger" },
             { label: "Global Config", slug: "reference/global-config" },
             { label: "Repo Config", slug: "reference/repo-config" },
             { label: "Environment Variables", slug: "reference/environment" },

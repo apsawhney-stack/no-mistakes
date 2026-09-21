@@ -172,14 +172,20 @@ func (d *DB) FixedFindingsByStep(step *StepResult) (int, error) {
 }
 
 // StepFindingStats returns reported and fixed finding counts for a single step.
+//
 // When finding ledger entries exist, fixed findings are strictly verified code
-// fixes (closed_verified), not explicit operator approvals or waivers.
+// fixes (closed_verified), not explicit operator approvals or waivers: an
+// accepted exception, a not-applicable decision, a supersession, and a
+// legacy-imported reconciliation are all reported as reported-but-not-fixed, so
+// a waived finding can never read as a repaired one. Step-owned operator parks
+// (budget cuts, protected-path refusals, a failing configured test command) stay
+// out of both counts, exactly as they were before the ledger existed.
 func (d *DB) StepFindingStats(step *StepResult) (StepStats, error) {
 	stats := StepStats{StepName: step.StepName}
 	entries, err := d.GetFindingLedgerEntriesByStep(step.RunID, step.StepName)
 	if err == nil && len(entries) > 0 {
 		for _, e := range entries {
-			if e.ReportedID == types.FindingIDTestAgentTimeout || e.ReportedID == types.FindingIDTestAgentUnvalidatedWork {
+			if types.IsStepOwnedFinding(types.Finding{ID: e.ReportedID, Category: e.Category}) {
 				continue
 			}
 			stats.ReportedFindings++

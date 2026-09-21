@@ -132,13 +132,11 @@ func TestFindingLedger_LegacyMigration_ActiveRunOmissionRequiresReconciliation(t
 		t.Fatalf("InsertStepRound 2: %v", err)
 	}
 
-	// Clean out any entries if auto-migrated during insert to simulate legacy pre-ledger DB.
-	_, _ = db.sql.Exec(`DELETE FROM finding_ledger_entries WHERE run_id = ?`, run.ID)
-	_, _ = db.sql.Exec(`DELETE FROM finding_ledger_events WHERE run_id = ?`, run.ID)
-
-	// Run migration
-	if err := db.migrateLegacyFindingLedger(); err != nil {
-		t.Fatalf("migrateLegacyFindingLedger: %v", err)
+	// Import this run the way the pipeline does: lazily, when a ledger is
+	// created for it. Nothing is imported at Open, so a run the pipeline never
+	// adopts keeps its pre-ledger accounting untouched.
+	if err := db.MigrateLegacyFindingLedgerForRun(run.ID); err != nil {
+		t.Fatalf("MigrateLegacyFindingLedgerForRun: %v", err)
 	}
 
 	entries, err := db.GetFindingLedgerEntries(run.ID)
@@ -171,8 +169,8 @@ func TestFindingLedger_LegacyMigration_ActiveRunOmissionRequiresReconciliation(t
 	}
 
 	// Idempotency check: running migration again does not duplicate or alter entries
-	if err := db.migrateLegacyFindingLedger(); err != nil {
-		t.Fatalf("repeat migrateLegacyFindingLedger: %v", err)
+	if err := db.MigrateLegacyFindingLedgerForRun(run.ID); err != nil {
+		t.Fatalf("repeat MigrateLegacyFindingLedgerForRun: %v", err)
 	}
 	repeatEntries, err := db.GetFindingLedgerEntries(run.ID)
 	if err != nil || len(repeatEntries) != 2 {
@@ -256,5 +254,231 @@ func TestFindingLedger_StatsDistinguishesVerifiedFixFromAcceptance(t *testing.T)
 	}
 	if stats.FixedFindings != 1 {
 		t.Errorf("FixedFindings = %d, want 1 (acceptance must not turn into fixed)", stats.FixedFindings)
+	}
+}
+
+// TestFindingLedger_CompletedRunIsNeverImported pins the historical boundary:
+// completed runs keep exactly the evidence they recorded. Importing them would
+// have to invent a disposition (nobody accepted anything at import time) or,
+// by switching StepFindingStats onto the ledger, silently restate old fixed
+// counts as unfixed.
+func TestFindingLedger_CompletedRunIsNeverImported(t *testing.T) {
+	db := openTestDB(t)
+
+	repo, err := db.InsertRepo(t.TempDir(), "https://github.com/example/repo", "main")
+	if err != nil {
+		t.Fatalf("InsertRepo: %v", err)
+	}
+	run, err := db.InsertRun(repo.ID, "feature", "head-1", "base-1")
+	if err != nil {
+		t.Fatalf("InsertRun: %v", err)
+	}
+	if err := db.UpdateRunStatus(run.ID, types.RunCompleted); err != nil {
+		t.Fatalf("UpdateRunStatus: %v", err)
+	}
+	sr, err := db.InsertStepResult(run.ID, types.StepReview)
+	if err != nil {
+		t.Fatalf("InsertStepResult: %v", err)
+	}
+	findings := `{"findings":[{"id":"review-1","severity":"error","file":"a.go","line":5,"description":"bug A","action":"auto-fix"}],"summary":"1 issue"}`
+	if _, err := db.InsertStepRound(sr.ID, 1, "initial", &findings, nil, 100); err != nil {
+		t.Fatalf("InsertStepRound: %v", err)
+	}
+
+	// Even an explicit request refuses a terminal run.
+	if err := db.MigrateLegacyFindingLedgerForRun(run.ID); err != nil {
+		t.Fatalf("MigrateLegacyFindingLedgerForRun: %v", err)
+	}
+	entries, err := db.GetFindingLedgerEntries(run.ID)
+	if err != nil {
+		t.Fatalf("GetFindingLedgerEntries: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("completed run imported %d ledger entries, want 0", len(entries))
+	}
+	for _, e := range entries {
+		if e.Status != types.FindingLedgerStatusOpen {
+			t.Fatalf("imported entry %s has status %q, want open", e.ID, e.Status)
+		}
+	}
+}
+
+// TestFindingLedger_MigrationMarkerSurvivesAPartialAttempt pins the idempotency
+// owner: the migration marker, not the presence of imported entries. A crash
+// that left entries behind without the marker must be completed on retry rather
+// than skipped as already-migrated.
+func TestFindingLedger_MigrationMarkerSurvivesAPartialAttempt(t *testing.T) {
+	db := openTestDB(t)
+
+	repo, err := db.InsertRepo(t.TempDir(), "https://github.com/example/repo", "main")
+	if err != nil {
+		t.Fatalf("InsertRepo: %v", err)
+	}
+	run, err := db.InsertRun(repo.ID, "feature", "head-1", "base-1")
+	if err != nil {
+		t.Fatalf("InsertRun: %v", err)
+	}
+	if err := db.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatalf("UpdateRunStatus: %v", err)
+	}
+	sr, err := db.InsertStepResult(run.ID, types.StepReview)
+	if err != nil {
+		t.Fatalf("InsertStepResult: %v", err)
+	}
+	findings := `{"findings":[{"id":"review-1","severity":"error","file":"a.go","line":5,"description":"bug A","action":"auto-fix"},{"id":"review-2","severity":"error","file":"b.go","line":9,"description":"bug B","action":"auto-fix"}],"summary":"2 issues"}`
+	if _, err := db.InsertStepRound(sr.ID, 1, "initial", &findings, nil, 100); err != nil {
+		t.Fatalf("InsertStepRound: %v", err)
+	}
+
+	// Seed entries without a marker. The transactional import cannot produce
+	// this state, so this is a deliberate pin on the idempotency owner: if a
+	// future change drops the transaction, "some entry exists" must still not
+	// be allowed to stand in for the marker and skip the rest of a run.
+	for _, id := range []string{"fn-partial-1"} {
+		entry := &types.FindingLedgerEntry{
+			ID: id, RunID: run.ID, RepoID: repo.ID, StepName: types.StepReview,
+			FirstSeenRound: 1, FirstSeenStepResultID: sr.ID, ReportedID: "review-1",
+			Fingerprint: "partial", Severity: "error", Action: types.ActionAutoFix,
+			File: "a.go", Line: 5, Description: "bug A",
+			OriginalFindingJSON: `{}`, CurrentFindingJSON: `{}`,
+			Status: types.FindingLedgerStatusOpen, IsBlocking: true,
+			LastObservedRound: 1, LastObservedFile: "a.go", LastObservedLine: 5,
+		}
+		if err := db.InsertFindingLedgerEntry(entry); err != nil {
+			t.Fatalf("seed partial entry: %v", err)
+		}
+	}
+
+	if err := db.MigrateLegacyFindingLedgerForRun(run.ID); err != nil {
+		t.Fatalf("retry migration: %v", err)
+	}
+
+	// The retry completed the import: both real findings are present, and a
+	// second retry is a no-op because the marker now exists.
+	entries, err := db.GetFindingLedgerEntries(run.ID)
+	if err != nil {
+		t.Fatalf("GetFindingLedgerEntries: %v", err)
+	}
+	reported := map[string]bool{}
+	for _, e := range entries {
+		reported[e.ReportedID] = true
+	}
+	if !reported["review-1"] || !reported["review-2"] {
+		t.Fatalf("retry did not complete the import: %v", reported)
+	}
+	if len(entries) != 3 {
+		t.Fatalf("entries = %d, want the seeded partial plus both real findings", len(entries))
+	}
+	if err := db.MigrateLegacyFindingLedgerForRun(run.ID); err != nil {
+		t.Fatalf("repeat migration: %v", err)
+	}
+	repeat, err := db.GetFindingLedgerEntries(run.ID)
+	if err != nil {
+		t.Fatalf("GetFindingLedgerEntries: %v", err)
+	}
+	if len(repeat) != len(entries) {
+		t.Fatalf("repeat migration changed entry count from %d to %d", len(entries), len(repeat))
+	}
+}
+
+// TestFindingLedger_MigrationSkipsStepOwnedFindings pins that a pre-ledger run
+// does not import an operator park its step re-derives from live state, because
+// nothing in the ledger could ever close it.
+func TestFindingLedger_MigrationSkipsStepOwnedFindings(t *testing.T) {
+	db := openTestDB(t)
+
+	repo, err := db.InsertRepo(t.TempDir(), "https://github.com/example/repo", "main")
+	if err != nil {
+		t.Fatalf("InsertRepo: %v", err)
+	}
+	run, err := db.InsertRun(repo.ID, "feature", "head-1", "base-1")
+	if err != nil {
+		t.Fatalf("InsertRun: %v", err)
+	}
+	if err := db.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatalf("UpdateRunStatus: %v", err)
+	}
+	sr, err := db.InsertStepResult(run.ID, types.StepTest)
+	if err != nil {
+		t.Fatalf("InsertStepResult: %v", err)
+	}
+	findings := `{"findings":[{"id":"test-agent-timeout","severity":"warning","action":"ask-user","description":"budget cut"},{"id":"test-1","severity":"error","action":"auto-fix","file":"a.go","description":"scenario failed"}],"summary":"2 issues"}`
+	if _, err := db.InsertStepRound(sr.ID, 1, "initial", &findings, nil, 100); err != nil {
+		t.Fatalf("InsertStepRound: %v", err)
+	}
+
+	if err := db.MigrateLegacyFindingLedgerForRun(run.ID); err != nil {
+		t.Fatalf("MigrateLegacyFindingLedgerForRun: %v", err)
+	}
+	entries, err := db.GetFindingLedgerEntries(run.ID)
+	if err != nil {
+		t.Fatalf("GetFindingLedgerEntries: %v", err)
+	}
+	if len(entries) != 1 || entries[0].ReportedID != "test-1" {
+		t.Fatalf("imported entries = %+v, want only the analyzer finding test-1", entries)
+	}
+}
+
+// TestFindingLedger_SummaryPublishesOnlyUnresolvedEntries pins the protocol's
+// bounded publishable surface: counts cover every entry, Entries covers what
+// still requires a disposition.
+func TestFindingLedger_SummaryPublishesOnlyUnresolvedEntries(t *testing.T) {
+	db := openTestDB(t)
+
+	repo, err := db.InsertRepo(t.TempDir(), "https://github.com/example/repo", "main")
+	if err != nil {
+		t.Fatalf("InsertRepo: %v", err)
+	}
+	run, err := db.InsertRun(repo.ID, "feature", "head-1", "base-1")
+	if err != nil {
+		t.Fatalf("InsertRun: %v", err)
+	}
+	sr, err := db.InsertStepResult(run.ID, types.StepReview)
+	if err != nil {
+		t.Fatalf("InsertStepResult: %v", err)
+	}
+	base := func(id, status string) *types.FindingLedgerEntry {
+		return &types.FindingLedgerEntry{
+			ID: id, RunID: run.ID, RepoID: repo.ID, StepName: types.StepReview,
+			FirstSeenRound: 1, FirstSeenStepResultID: sr.ID, ReportedID: id,
+			Fingerprint: id, Severity: "error", Action: types.ActionAutoFix,
+			File: "a.go", Line: 1, Description: id,
+			OriginalFindingJSON: `{}`, CurrentFindingJSON: `{}`,
+			Status: status, IsBlocking: true,
+			LastObservedRound: 1, LastObservedFile: "a.go", LastObservedLine: 1,
+		}
+	}
+	for _, e := range []*types.FindingLedgerEntry{
+		base("fn-open", types.FindingLedgerStatusOpen),
+		base("fn-pending", types.FindingLedgerStatusPendingVerification),
+		base("fn-reconcile", types.FindingLedgerStatusNeedsReconciliation),
+		base("fn-verified", types.FindingLedgerStatusClosedVerified),
+		base("fn-accepted", types.FindingLedgerStatusClosedAccepted),
+	} {
+		if err := db.InsertFindingLedgerEntry(e); err != nil {
+			t.Fatalf("insert %s: %v", e.ID, err)
+		}
+	}
+
+	summary, err := db.GetFindingLedgerSummary(run.ID)
+	if err != nil {
+		t.Fatalf("GetFindingLedgerSummary: %v", err)
+	}
+	if summary.ProtocolVersion != types.FindingLedgerProtocolVersion {
+		t.Fatalf("protocol_version = %q, want %q", summary.ProtocolVersion, types.FindingLedgerProtocolVersion)
+	}
+	if summary.TotalEntries != 5 || summary.OpenCount != 1 || summary.PendingCount != 1 || summary.ReconcileCount != 1 || summary.ClosedCount != 2 {
+		t.Fatalf("summary counts = %+v", summary)
+	}
+	if !summary.HasBlocking || summary.Unresolved() != 3 {
+		t.Fatalf("summary blocking=%v unresolved=%d, want true/3", summary.HasBlocking, summary.Unresolved())
+	}
+	if len(summary.Entries) != 3 {
+		t.Fatalf("summary published %d entries, want only the 3 unresolved", len(summary.Entries))
+	}
+	for _, e := range summary.Entries {
+		if types.IsClosedLedgerStatus(e.Status) {
+			t.Fatalf("summary published closed entry %s", e.ID)
+		}
 	}
 }

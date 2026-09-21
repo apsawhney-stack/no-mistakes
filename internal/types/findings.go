@@ -122,6 +122,51 @@ const FindingIDTestAgentTimeout = "test-agent-timeout"
 // publish the work.
 const FindingIDTestAgentUnvalidatedWork = "test-agent-unvalidated-work"
 
+// FindingIDProtectedPathRefusal is the CI-step park when an automatic commit
+// was refused because a fix left edits on a protected path. Approve is refused
+// on that gate: the edit must be resolved and the retry driven with fix.
+const FindingIDProtectedPathRefusal = "protected-path-refusal"
+
+// FindingIDCIFixAgentTimeout is the CI-step park when an auto-fix invocation
+// burned its wall-clock budget. It is a budget/provider-slowness cut, not a
+// product defect; the operator decides whether to spend another budget.
+const FindingIDCIFixAgentTimeout = "ci-fix-agent-timeout"
+
+// stepOwnedFindingIDs are the finding identities a pipeline step synthesizes
+// from live state on every round, rather than reporting them as claims about
+// the change under validation.
+var stepOwnedFindingIDs = []string{
+	FindingIDTestAgentTimeout,
+	FindingIDTestAgentUnvalidatedWork,
+	FindingIDProtectedPathRefusal,
+	FindingIDCIFixAgentTimeout,
+}
+
+// IsStepOwnedFinding reports whether f is an operator-decision park that its
+// own step synthesizes from live state rather than a claim about the change.
+//
+// These findings share one shape: the step re-derives them from a live
+// condition on every round (how long an invocation ran, what a configured test
+// command returned, whether a fix left edits on a protected path), Approve is
+// refused or qualified on them, and the condition clears by resolving that live
+// state rather than by repairing a reported defect. They are not repair targets,
+// so no fix round ever selects them.
+//
+// They keep their existing owner and are deliberately NOT admitted to the
+// durable finding ledger. A later round that omits one has re-measured the live
+// condition, which is the opposite of an analyzer's omission - the exact
+// ambiguity the ledger's "silence never closes a finding" rule exists to refuse.
+// Admitting them would leave an entry nothing can close and would park every
+// such gate forever. Their refusal, override, and exception semantics stay with
+// the step and the executor's ApprovalOverrideVerifier, and the stats that
+// already exclude the Test budget cuts keep excluding them.
+func IsStepOwnedFinding(f Finding) bool {
+	if f.Category == FindingCategoryTestCommand {
+		return true
+	}
+	return slices.Contains(stepOwnedFindingIDs, f.ID)
+}
+
 // Test scenario result constants: the vocabulary the test step's evidence
 // prompt instructs the agent to use for each derived scenario.
 //

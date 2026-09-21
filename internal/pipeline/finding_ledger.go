@@ -36,15 +36,19 @@ func NewFindingLedger(database *db.DB, runID, repoID string) *FindingLedger {
 // ProcessRoundFindings updates the durable ledger with the findings produced by one
 // execution round, performs verified-fix closure checks, unions unresolved entries,
 // and returns the consolidated effective findings JSON.
+//
+// The guard inputs come from durable evidence rather than from the caller: the
+// fixing session was recorded with the correcting revision, and this round's
+// certifier identity and resumption flag ride the step outcome. That is what
+// makes "the session that applied the correction cannot certify it" a check
+// instead of an assumption.
 func (l *FindingLedger) ProcessRoundFindings(
 	ctx context.Context,
 	stepName types.StepName,
 	stepResultID string,
 	roundNum int,
 	outcome *StepOutcome,
-	fixing bool,
 	currentCommitSHA string,
-	fixSessionID string,
 ) (string, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -163,45 +167,97 @@ func (l *FindingLedger) ProcessRoundFindings(
 		}
 	}
 
+	// The turn that produced THIS round's outcome, used as the closure
+	// certifier's identity.
+	certifierSessionID := ""
+	certifierResumed := false
+	if outcome != nil {
+		certifierSessionID = strings.TrimSpace(outcome.AgentSessionID)
+		certifierResumed = outcome.AgentSessionResumed
+	}
+
+	// A CI check observation is a live measurement, not a claim about code, and
+	// the CI step owns its finding set: a fresh SETTLED observation replaces the
+	// previous one (AGENTS.md, CI Step Findings Model). So a settled clean CI
+	// observation supersedes the check-anchored entries it no longer reports. It
+	// is recorded as an operator-visible supersession naming the observed head,
+	// never as a verified fix, so a red that simply stopped reproducing stays
+	// distinguishable from a proven repair in statistics and output. A
+	// non-clean or unresolved CI round supersedes nothing, and a review-bot
+	// comment is not a check observation at all, so it keeps its own lifecycle
+	// (it parks as an ask-user finding until a human decides).
+	ciSettledClean := stepName == types.StepCI && outcome != nil &&
+		!outcome.NeedsApproval && outcome.ExitCode == 0 && len(roundItems) == 0
+
 	// Pass 3: handle unresolved ledger entries NOT reported in this round.
 	for _, e := range unresolved {
 		if pairedLedgerID[e.ID] {
 			continue
 		}
 
+		// A selected, repaired CI check keeps the verified-closure path: its
+		// published repair plus the check's own re-run at the corrected revision
+		// is a real proof and belongs in the verified count. Supersession covers
+		// only entries no correction was ever dispatched for.
+		if ciSettledClean && e.Status != types.FindingLedgerStatusPendingVerification && supersededByCICleanObservation(e) {
+			stateBefore := e.Status
+			e.Status = types.FindingLedgerStatusClosedSuperseded
+			e.ClosedInRound = roundNum
+			e.ClosureReason = "superseded by a fresh settled CI observation"
+			e.ClosureEvidence = fmt.Sprintf("settled CI observation at head %s reported no failing check", shortCommit(currentCommitSHA))
+			e.DispositionProvenance = "ci_settled_observation"
+			_ = l.db.UpdateFindingLedgerEntry(e)
+
+			ev := &types.FindingLedgerEvent{
+				EntryID:      e.ID,
+				RunID:        l.runID,
+				StepName:     stepName,
+				Round:        roundNum,
+				StepResultID: stepResultID,
+				EventType:    types.FindingEventSuperseded,
+				StateBefore:  stateBefore,
+				StateAfter:   types.FindingLedgerStatusClosedSuperseded,
+				CommitSHA:    currentCommitSHA,
+				Evidence:     e.ClosureEvidence,
+				Reason:       e.ClosureReason,
+				Provenance:   e.DispositionProvenance,
+			}
+			_ = l.db.RecordFindingLedgerEvent(ev)
+			continue
+		}
+
 		if e.Status == types.FindingLedgerStatusPendingVerification {
-			// Check if verified closure conditions are met.
+			// Closure is a proof, not a conclusion. It requires all of: a
+			// recorded correcting revision, a closure review of THAT revision,
+			// and a certifier that is not the session which applied the fix.
 			canClose := false
 			evidence := ""
+			refusal := ""
 
-			// Must have a recorded correcting commit revision.
-			// And the session/turn that applied the fix cannot self-certify closure.
-			if e.CorrectingCommitSHA != "" && (e.FixSessionID == "" || fixSessionID != e.FixSessionID) {
-				if stepName == types.StepReview {
-					normFile := normalizeCoveredPath(e.File)
-					if e.DecisionID != "" {
-						reviews := decisionReviews[e.DecisionID]
-						if len(reviews) == 1 && reviews[0].Result == "satisfied" &&
-							strings.TrimSpace(reviews[0].Evidence) != "" && !reportedDecisionIDs[e.DecisionID] {
-							canClose = true
-							evidence = fmt.Sprintf("commit %s, decision %s satisfied: %s", e.CorrectingCommitSHA, e.DecisionID, reviews[0].Evidence)
-						}
-					} else if coverageValid && !hasUnanchoredFinding && coveredFiles[normFile] && !reportedFiles[normFile] {
-						canClose = true
-						evidence = fmt.Sprintf("commit %s, covered %s", e.CorrectingCommitSHA, normFile)
-					}
-				} else if stepName == types.StepTest {
-					// Test step: closing verified requires passing scenario / command on tested head.
-					if outcome.ExitCode == 0 && (parsedRoundFindings.Verdict == types.TestVerdictGo || parsedRoundFindings.Verdict == "") {
-						canClose = true
-						evidence = fmt.Sprintf("commit %s, test exit 0 verdict %s", e.CorrectingCommitSHA, parsedRoundFindings.Verdict)
-					}
-				} else {
-					// Lint / other steps with exit 0 and no reported defects.
-					if outcome.ExitCode == 0 && len(roundItems) == 0 {
-						canClose = true
-						evidence = fmt.Sprintf("commit %s, exit 0", e.CorrectingCommitSHA)
-					}
+			switch {
+			case e.CorrectingCommitSHA == "":
+				// The fix round never recorded the revision it produced, so there
+				// is nothing a closure review could be a review OF.
+				refusal = "no recorded correcting revision"
+			case !l.certifierIsIndependent(e, certifierSessionID, certifierResumed):
+				refusal = fmt.Sprintf("certified by the correcting session %s", e.FixSessionID)
+			case currentCommitSHA != "" && currentCommitSHA != e.CorrectingCommitSHA:
+				// The reviewed head is not the corrected revision: the review that
+				// would close this entry did not look at the fix.
+				refusal = fmt.Sprintf("closure review is of %s, not the correcting revision %s", shortCommit(currentCommitSHA), shortCommit(e.CorrectingCommitSHA))
+			default:
+				canClose, evidence = l.closureEvidenceFor(e, stepName, outcome, closureContext{
+					roundItems:          roundItems,
+					parsedRoundFindings: parsedRoundFindings,
+					coverageValid:       coverageValid,
+					coveredFiles:        coveredFiles,
+					reportedFiles:       reportedFiles,
+					hasUnanchored:       hasUnanchoredFinding,
+					decisionReviews:     decisionReviews,
+					reportedDecisionIDs: reportedDecisionIDs,
+				})
+				if !canClose && refusal == "" {
+					refusal = "closure review did not positively cover the corrected revision"
 				}
 			}
 
@@ -222,6 +278,7 @@ func (l *FindingLedger) ProcessRoundFindings(
 					StateBefore:  types.FindingLedgerStatusPendingVerification,
 					StateAfter:   types.FindingLedgerStatusClosedVerified,
 					CommitSHA:    e.CorrectingCommitSHA,
+					SessionID:    certifierSessionID,
 					Evidence:     evidence,
 					Reason:       e.ClosureReason,
 				}
@@ -229,7 +286,7 @@ func (l *FindingLedger) ProcessRoundFindings(
 				continue
 			}
 
-			// Not verified closed -> records non-rediscovery and remains pending/open.
+			// Not verified closed -> records non-rediscovery and remains pending.
 			ev := &types.FindingLedgerEvent{
 				EntryID:      e.ID,
 				RunID:        l.runID,
@@ -239,32 +296,14 @@ func (l *FindingLedger) ProcessRoundFindings(
 				EventType:    types.FindingEventNotRediscovered,
 				StateBefore:  e.Status,
 				StateAfter:   e.Status,
-				Reason:       "omitted without verified closure evidence; remains in ledger",
-			}
-			_ = l.db.RecordFindingLedgerEvent(ev)
-		} else if stepName == types.StepCI && outcome.ExitCode == 0 && len(roundItems) == 0 {
-			stateBefore := e.Status
-			e.Status = types.FindingLedgerStatusClosedVerified
-			e.ClosedInRound = roundNum
-			e.ClosureEvidence = "all CI checks passed"
-			e.ClosureReason = "verified fixed by passing CI run"
-			_ = l.db.UpdateFindingLedgerEntry(e)
-
-			ev := &types.FindingLedgerEvent{
-				EntryID:      e.ID,
-				RunID:        l.runID,
-				StepName:     stepName,
-				Round:        roundNum,
-				StepResultID: stepResultID,
-				EventType:    types.FindingEventClosureReviewed,
-				StateBefore:  stateBefore,
-				StateAfter:   types.FindingLedgerStatusClosedVerified,
-				Evidence:     e.ClosureEvidence,
-				Reason:       e.ClosureReason,
+				Reason:       fmt.Sprintf("omitted without verified closure (%s); remains pending verification", refusal),
 			}
 			_ = l.db.RecordFindingLedgerEvent(ev)
 		} else {
-			// e.Status == open or needs_reconciliation
+			// An open or reconciliation-required entry stays exactly where it is.
+			// An empty or partial round scan is silence, and silence never closes
+			// a blocking finding: only selection plus verified closure, or an
+			// explicit disposition, may.
 			ev := &types.FindingLedgerEvent{
 				EntryID:      e.ID,
 				RunID:        l.runID,
@@ -281,8 +320,17 @@ func (l *FindingLedger) ProcessRoundFindings(
 	}
 
 	// Pass 4: admit new round items that did not match any unresolved entry.
+	// Step-owned findings (a Test budget cut, a failing configured test command)
+	// are passed through unresolved instead of admitted: they are re-derived from
+	// live state each round, so their absence from a later round is a
+	// re-measurement, not an analyzer omission. See types.IsStepOwnedFinding.
+	var unledgered []types.Finding
 	for i, item := range roundItems {
 		if pairedRoundIndex[i] {
+			continue
+		}
+		if types.IsStepOwnedFinding(item) {
+			unledgered = append(unledgered, item)
 			continue
 		}
 		itemJSON, _ := json.Marshal(item)
@@ -333,7 +381,7 @@ func (l *FindingLedger) ProcessRoundFindings(
 	}
 
 	// 4. Construct effective findings consolidating all unresolved ledger entries for this step.
-	return l.buildEffectiveFindingsJSON(stepName, parsedRoundFindings)
+	return l.buildEffectiveFindingsJSON(stepName, outcome.Findings, parsedRoundFindings, unledgered, outcome.ReviewedPaths)
 }
 
 func (l *FindingLedger) handleMatchedFinding(
@@ -358,8 +406,14 @@ func (l *FindingLedger) handleMatchedFinding(
 
 	stateBefore := e.Status
 	// If it was pending verification and re-reported, the fix failed -> returns to open!
+	// A reopened entry keeps its content identity but must lose correction
+	// evidence: the revision it named was reviewed and the defect survived, so
+	// that evidence can never be reused to close the finding later.
 	if e.Status == types.FindingLedgerStatusPendingVerification {
 		e.Status = types.FindingLedgerStatusOpen
+		e.CorrectingCommitSHA = ""
+		e.FixSessionID = ""
+		e.ClosureEvidence = ""
 	}
 
 	_ = l.db.UpdateFindingLedgerEntry(e)
@@ -377,9 +431,147 @@ func (l *FindingLedger) handleMatchedFinding(
 	_ = l.db.RecordFindingLedgerEvent(ev)
 }
 
-// buildEffectiveFindingsJSON compiles all unresolved ledger entries for stepName
-// into a types.Findings JSON payload, assigning stable unambiguous IDs.
-func (l *FindingLedger) buildEffectiveFindingsJSON(stepName types.StepName, base types.Findings) (string, error) {
+// certifierIsIndependent reports whether the turn that produced this round's
+// outcome may certify closure of e. The session that applied a correction is
+// never allowed to certify it; neither is a turn that cannot be told apart from
+// it. The answer is deliberately asymmetric:
+//
+//   - A run/adapter that never minted a durable fix session (e.FixSessionID is
+//     empty) has no self-certification risk to guard: every one of its turns is
+//     a cold invocation. Non-review fixes run session-free by construction
+//     (SessionRole is unset outside the review fixer).
+//   - A certifier that did not CONTINUE a session ran cold. A cold turn is a
+//     fresh invocation and therefore independent of every earlier one, whatever
+//     identity its adapter reports - reporting a session identity is not the
+//     same as resuming one, and some adapters (and fixtures) reuse a value.
+//   - Only a certifier that both resumed a session and reports the fixing
+//     session's identity is refused.
+//
+// The executor supplies the fixing session from the durable review-fixer role
+// and the certifier from the outcome of the turn that produced the closure
+// review, so the guard is real evidence rather than a field nobody fills. The
+// invocations that certify closure - the review rereview and the Test evidence
+// turn - run session-free by construction (see RunSessions), which is exactly
+// why this can be checked rather than assumed: routing one of them through the
+// fixing role session is what would make this refuse.
+func (l *FindingLedger) certifierIsIndependent(e *types.FindingLedgerEntry, certifier string, certifierResumed bool) bool {
+	fixer := strings.TrimSpace(e.FixSessionID)
+	certifier = strings.TrimSpace(certifier)
+	if fixer == "" || !certifierResumed {
+		return true
+	}
+	return certifier != fixer
+}
+
+// closureContext carries the current round's positive-verification evidence.
+type closureContext struct {
+	roundItems          []types.Finding
+	parsedRoundFindings types.Findings
+	coverageValid       bool
+	coveredFiles        map[string]bool
+	reportedFiles       map[string]bool
+	hasUnanchored       bool
+	decisionReviews     map[string][]types.DecisionReview
+	reportedDecisionIDs map[string]bool
+}
+
+// closureEvidenceFor decides whether this round positively certifies that the
+// corrected revision no longer carries e, and describes the evidence if so.
+//
+// One shape per step, because "what would prove this is gone" differs by step:
+// a review proves it through coverage of the corrected file with no defect
+// re-reported, a test through a passing live-validation verdict recorded on the
+// correcting revision, and every deterministic step through re-running clean on
+// it. All of them share the same refusals applied by the caller: no correcting
+// revision, a non-independent certifier, or a review of some other revision.
+func (l *FindingLedger) closureEvidenceFor(e *types.FindingLedgerEntry, stepName types.StepName, outcome *StepOutcome, cc closureContext) (bool, string) {
+	if outcome == nil {
+		return false, ""
+	}
+	switch stepName {
+	case types.StepReview:
+		if e.DecisionID != "" {
+			reviews := cc.decisionReviews[e.DecisionID]
+			if len(reviews) == 1 && reviews[0].Result == "satisfied" &&
+				strings.TrimSpace(reviews[0].Evidence) != "" && !cc.reportedDecisionIDs[e.DecisionID] {
+				return true, fmt.Sprintf("commit %s, fresh review satisfied decision %s: %s",
+					shortCommit(e.CorrectingCommitSHA), e.DecisionID, reviews[0].Evidence)
+			}
+			return false, ""
+		}
+		normFile := normalizeCoveredPath(e.File)
+		if normFile == "" {
+			return false, ""
+		}
+		if cc.coverageValid && !cc.hasUnanchored && cc.coveredFiles[normFile] && !cc.reportedFiles[normFile] {
+			return true, fmt.Sprintf("commit %s, fresh review covered %s and re-reported no defect in it",
+				shortCommit(e.CorrectingCommitSHA), normFile)
+		}
+		return false, ""
+	case types.StepTest:
+		// The reproducer must have been driven on the corrected revision: a
+		// pass on any other head says nothing about this fix.
+		if outcome.ExitCode != 0 || cc.parsedRoundFindings.Verdict != types.TestVerdictGo {
+			return false, ""
+		}
+		testedHead := strings.TrimSpace(cc.parsedRoundFindings.TestedHeadSHA)
+		if testedHead != "" && testedHead != e.CorrectingCommitSHA {
+			return false, ""
+		}
+		return true, fmt.Sprintf("commit %s, live-validation verdict %q", shortCommit(e.CorrectingCommitSHA), types.TestVerdictGo)
+	default:
+		// Deterministic steps (lint, document, push, custom gates) prove closure
+		// by re-running clean on the corrected revision: exit 0 with nothing
+		// re-reported. The caller has already required the pending state, the
+		// recorded correcting revision, and that this round is that revision.
+		if outcome.ExitCode != 0 || len(cc.roundItems) != 0 {
+			return false, ""
+		}
+		return true, fmt.Sprintf("commit %s, step re-ran clean (exit 0, no findings)", shortCommit(e.CorrectingCommitSHA))
+	}
+}
+
+// supersededByCICleanObservation reports whether a clean, settled CI
+// observation could have re-reported this entry, and therefore replaces it.
+// Only checks the CI step actually observes qualify: a failing job, a transient
+// that resolved, or a merge conflict that no longer reproduces. A review-bot
+// comment rides the same step but is a human decision, not a check result.
+func supersededByCICleanObservation(e *types.FindingLedgerEntry) bool {
+	switch e.Category {
+	case types.FindingCategoryCICheck, types.FindingCategoryCITransient, types.FindingCategoryCIMergeConflict:
+		return true
+	default:
+		return false
+	}
+}
+
+// shortCommit renders a commit for human-readable evidence, keeping the first
+// twelve characters so a closure record names the revision without pasting a
+// full SHA into every event.
+func shortCommit(sha string) string {
+	sha = strings.TrimSpace(sha)
+	if len(sha) > 12 {
+		return sha[:12]
+	}
+	return sha
+}
+
+// buildEffectiveFindingsJSON compiles this step's unresolved ledger entries into
+// a types.Findings payload, assigning stable display IDs and carrying each
+// entry's immutable ledger ID.
+//
+// The payload always preserves the round's own evidence metadata - reviewed
+// paths, decision reviews, live-validation verdict, scenarios, artifacts, risk -
+// because that metadata is the step's product even when it has no items. Only
+// the items are replaced by the unresolved ledger set. Two properties depend on
+// this: a Test step that found nothing must still publish its verdict (the PR
+// attestation's live_validation lives there), and a clean review round must
+// still publish its coverage record (a missing one parks the gate). Dropping
+// either by returning an empty payload would erase real evidence.
+//
+// An empty string is returned only when the round produced no findings payload
+// at all AND nothing is unresolved, which is the one case with nothing to say.
+func (l *FindingLedger) buildEffectiveFindingsJSON(stepName types.StepName, roundRaw string, base types.Findings, unledgered []types.Finding, reviewedPaths []string) (string, error) {
 	entries, err := l.db.GetFindingLedgerEntriesByStep(l.runID, stepName)
 	if err != nil {
 		return "", err
@@ -392,11 +584,11 @@ func (l *FindingLedger) buildEffectiveFindingsJSON(stepName types.StepName, base
 		}
 	}
 
-	if len(activeEntries) == 0 {
+	if len(activeEntries) == 0 && len(unledgered) == 0 && strings.TrimSpace(roundRaw) == "" {
 		return "", nil
 	}
 
-	summary, err := l.db.GetFindingLedgerSummary(l.runID)
+	summary, err := l.db.GetFindingLedgerSummaryForStep(l.runID, stepName)
 	if err != nil {
 		summary = &types.FindingLedgerSummary{
 			ProtocolVersion: types.FindingLedgerProtocolVersion,
@@ -405,7 +597,8 @@ func (l *FindingLedger) buildEffectiveFindingsJSON(stepName types.StepName, base
 	}
 
 	// Assign unique, unambiguous display IDs for items while tracking LedgerID.
-	usedIDs := make(map[string]bool)
+	displayIDs := assignDisplayIDs(string(stepName), activeEntries)
+	usedIDs := make(map[string]bool, len(activeEntries))
 	var items []types.Finding
 	for _, e := range activeEntries {
 		var f types.Finding
@@ -419,30 +612,61 @@ func (l *FindingLedger) buildEffectiveFindingsJSON(stepName types.StepName, base
 			}
 		}
 		f.LedgerID = e.ID
-
-		// Keep original/reported ID if not taken by another active item; otherwise generate unique ID.
-		idCandidate := e.ReportedID
-		if idCandidate == "" || usedIDs[idCandidate] {
-			idCandidate = nextFreeID(string(stepName), usedIDs)
-		}
-		usedIDs[idCandidate] = true
-		f.ID = idCandidate
+		f.ID = displayIDs[e.ID]
+		usedIDs[f.ID] = true
 
 		items = append(items, f)
 	}
 
+	// Step-owned findings this round reported are carried verbatim: the ledger
+	// does not own them, but the gate and the refusal checks still must see
+	// them, so dropping them here would silently un-refuse an approval the
+	// pipeline deliberately refuses.
+	for _, f := range unledgered {
+		if f.ID == "" || usedIDs[f.ID] {
+			f.ID = nextFreeID(string(stepName), usedIDs)
+		}
+		usedIDs[f.ID] = true
+		items = append(items, f)
+	}
+
 	result := types.FindingsMetadata(base)
+	// The step's own coverage record is authoritative for this round and wins
+	// over whatever the round's payload happened to carry - the same precedence
+	// the pre-ledger carry merge applied - so a step that reports coverage on
+	// its outcome is never silently uncovered.
+	if len(reviewedPaths) > 0 {
+		result.ReviewedPaths = append([]string(nil), reviewedPaths...)
+	}
 	result.Items = items
-	result.Ledger = summary
-	if len(items) == 0 {
-		result.Summary = "clean"
-	} else if len(items) == 1 {
+	if summary.TotalEntries > 0 {
+		result.Ledger = summary
+	}
+	switch {
+	case len(items) == 1:
 		result.Summary = "1 open finding"
-	} else {
+	case len(items) > 1:
 		result.Summary = fmt.Sprintf("%d open findings", len(items))
 	}
 
 	return types.MarshalFindingsJSON(result)
+}
+
+// ledgerRequiresDisposition reports whether a step's effective findings payload
+// still carries an unresolved ledger entry. The executor parks on this in
+// addition to the finding-severity checks, so an entry the protocol has not
+// disposed of - including a non-blocking one that could otherwise complete its
+// step silently and then refuse terminal acceptance - always reaches a gate
+// instead of dead-ending the run.
+func ledgerRequiresDisposition(raw string) bool {
+	if raw == "" {
+		return false
+	}
+	parsed, err := types.ParseFindingsJSON(raw)
+	if err != nil {
+		return false
+	}
+	return parsed.Ledger.Unresolved() > 0
 }
 
 func nextFreeID(prefix string, used map[string]bool) string {
@@ -452,6 +676,71 @@ func nextFreeID(prefix string, used map[string]bool) string {
 			return candidate
 		}
 	}
+}
+
+// assignDisplayIDs maps each entry to the display ID the operator sees for it
+// this round: the analyzer's own label when it is still free, otherwise a
+// step-scoped minted one. Display IDs are presentation only - the durable
+// identity is the ledger ID - but a selection response names a display ID, so
+// the assignment must be reproducible server-side rather than stored.
+//
+// One owner matters: two entries that share an analyzer label (two rounds that
+// both said "review-1") mean the second one's display ID is derived, and
+// resolving a selection against the raw reported label instead would select the
+// first entry by its label while the operator meant the second by its display
+// ID. Both the payload builder and the selection resolver go through here.
+func assignDisplayIDs(stepName string, entries []*types.FindingLedgerEntry) map[string]string {
+	used := make(map[string]bool, len(entries))
+	assigned := make(map[string]string, len(entries))
+	for _, e := range entries {
+		candidate := e.ReportedID
+		if candidate == "" || used[candidate] {
+			candidate = nextFreeID(stepName, used)
+		}
+		used[candidate] = true
+		assigned[e.ID] = candidate
+	}
+	return assigned
+}
+
+// resolveLedgerSelection resolves the display IDs an operator selected to
+// ledger entry IDs. It accepts the immutable ledger ID, the display ID this
+// round shows, and the raw analyzed ID, in that order of authority, so a
+// response that used either vocabulary selects the entry the operator saw.
+func (l *FindingLedger) resolveLedgerSelection(stepName types.StepName, entries []*types.FindingLedgerEntry, selectedIDs []string) map[string]bool {
+	selected := make(map[string]bool, len(selectedIDs))
+	for _, id := range selectedIDs {
+		if id != "" {
+			selected[id] = true
+		}
+	}
+	matched := make(map[string]bool)
+	if len(selected) == 0 {
+		return matched
+	}
+	unresolved := make([]*types.FindingLedgerEntry, 0, len(entries))
+	for _, e := range entries {
+		if types.IsUnresolvedLedgerStatus(e.Status) {
+			unresolved = append(unresolved, e)
+		}
+	}
+	displayIDs := assignDisplayIDs(string(stepName), unresolved)
+	for _, e := range unresolved {
+		switch {
+		case selected[e.ID], selected[displayIDs[e.ID]]:
+			matched[e.ID] = true
+		default:
+			var curFinding types.Finding
+			if json.Unmarshal([]byte(e.CurrentFindingJSON), &curFinding) == nil && curFinding.ID != "" {
+				// The raw analyzed label is the last resort, and only when this
+				// round did not re-mint it into someone else's display ID.
+				if !selected[displayIDs[e.ID]] && selected[curFinding.ID] {
+					matched[e.ID] = true
+				}
+			}
+		}
+	}
+	return matched
 }
 
 // AdmitUserFindings admits user-added findings from a fix action into the ledger
@@ -549,27 +838,13 @@ func (l *FindingLedger) ProcessSelection(
 		return err
 	}
 
-	selectedSet := make(map[string]bool, len(selectedIDs))
-	for _, id := range selectedIDs {
-		if id != "" {
-			selectedSet[id] = true
-		}
-	}
+	matched := l.resolveLedgerSelection(stepName, entries, selectedIDs)
 
 	for _, e := range entries {
 		if !types.IsUnresolvedLedgerStatus(e.Status) {
 			continue
 		}
-		// Match by either immutable ledger ID, reported ID, or current finding ID.
-		matches := selectedSet[e.ID] || selectedSet[e.ReportedID]
-		if !matches {
-			var curFinding types.Finding
-			if json.Unmarshal([]byte(e.CurrentFindingJSON), &curFinding) == nil {
-				matches = selectedSet[curFinding.ID]
-			}
-		}
-
-		if matches && e.Status == types.FindingLedgerStatusOpen {
+		if matched[e.ID] && e.Status == types.FindingLedgerStatusOpen {
 			e.Status = types.FindingLedgerStatusPendingVerification
 			e.SelectedInRound = roundNum
 			if err := l.db.UpdateFindingLedgerEntry(e); err != nil {
@@ -652,9 +927,9 @@ func (l *FindingLedger) ProcessExplicitDispositionForEntries(
 		return err
 	}
 
-	filterMap := make(map[string]bool, len(entryIDs))
-	for _, id := range entryIDs {
-		filterMap[id] = true
+	matched := map[string]bool(nil)
+	if len(entryIDs) > 0 {
+		matched = l.resolveLedgerSelection(stepName, entries, entryIDs)
 	}
 
 	targetStatus := dispositionStatus
@@ -673,7 +948,7 @@ func (l *FindingLedger) ProcessExplicitDispositionForEntries(
 		if !types.IsUnresolvedLedgerStatus(e.Status) {
 			continue
 		}
-		if len(filterMap) > 0 && !filterMap[e.ID] && !filterMap[e.ReportedID] {
+		if matched != nil && !matched[e.ID] {
 			continue
 		}
 
@@ -682,7 +957,19 @@ func (l *FindingLedger) ProcessExplicitDispositionForEntries(
 		e.ClosedInRound = roundNum
 		e.ClosureReason = reason
 		e.DispositionProvenance = provenance
-		_ = l.db.UpdateFindingLedgerEntry(e)
+		// A reconciliation-required entry is closed by an operator's decision,
+		// not by proof: that decision IS the reconciliation. Record it so a
+		// reader can tell an accepted ambiguity from a verified fix, and never
+		// as closed_verified.
+		if stateBefore == types.FindingLedgerStatusNeedsReconciliation {
+			if strings.TrimSpace(e.ClosureReason) == "" {
+				e.ClosureReason = "reconciliation-required entry disposed by operator decision"
+			}
+			e.DispositionProvenance = provenance + ":reconciled"
+		}
+		if err := l.db.UpdateFindingLedgerEntry(e); err != nil {
+			return err
+		}
 
 		ev := &types.FindingLedgerEvent{
 			EntryID:      e.ID,
@@ -696,7 +983,9 @@ func (l *FindingLedger) ProcessExplicitDispositionForEntries(
 			Reason:       reason,
 			Provenance:   provenance,
 		}
-		_ = l.db.RecordFindingLedgerEvent(ev)
+		if err := l.db.RecordFindingLedgerEvent(ev); err != nil {
+			return err
+		}
 	}
 	return nil
 }

@@ -40,12 +40,7 @@ func Open(path string) (*DB, error) {
 			return nil, fmt.Errorf("migrate db: %w", err)
 		}
 	}
-	dbInst := &DB{sql: sqlDB}
-	if err := dbInst.migrateLegacyFindingLedger(); err != nil {
-		sqlDB.Close()
-		return nil, fmt.Errorf("migrate finding ledger: %w", err)
-	}
-	return dbInst, nil
+	return &DB{sql: sqlDB}, nil
 }
 
 // OpenReadOnly opens an existing database without creating or migrating it.

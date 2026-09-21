@@ -328,6 +328,18 @@ func (e *Executor) initializeRunScopes(runID string, repoIDs ...string) {
 	}
 }
 
+// fixSessionID is the durable identity of the session this run's fixer role used,
+// or "" when the run has no durable fix session (sessions disabled, or an
+// adapter that cannot resume one). The ledger records it with a correcting
+// revision so a later closure review can prove it is not the same session
+// certifying its own fix.
+func (e *Executor) fixSessionID() string {
+	if e == nil || e.sessions == nil {
+		return ""
+	}
+	return e.sessions.SessionID(SessionRoleFixer)
+}
+
 type stepExecutionState struct {
 	fixing                 bool
 	previousFindings       string
@@ -575,9 +587,6 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 			selectedOutstandingIDs = combineFindingIDLists(gate.selectedOutstandingIDs, newSelectedIDs)
 		}
 		allSelectedIDs := combineSelectedFindingIDs(response.findingIDs, selectedForPersistence)
-		if len(allSelectedIDs) == 0 && len(response.addedFindings) == 0 {
-			allSelectedIDs = extractFindingIDs(gate.findings)
-		}
 		if e.findingLedger != nil {
 			if len(response.addedFindings) > 0 {
 				if parsedMerged, parseErr := types.ParseFindingsJSON(merged); parseErr == nil {
@@ -1072,7 +1081,7 @@ rounds:
 		effectiveFindings := roundFindings
 		if e.findingLedger != nil {
 			if sctx.Fixing && run.HeadSHA != "" {
-				_ = e.findingLedger.RecordCorrectingRevision(ctx, stepName, roundNum, run.HeadSHA, sctx.FixSessionID)
+				_ = e.findingLedger.RecordCorrectingRevision(ctx, stepName, roundNum, run.HeadSHA, e.fixSessionID())
 			}
 			var ledgerErr error
 			effectiveFindings, ledgerErr = e.findingLedger.ProcessRoundFindings(
@@ -1081,9 +1090,7 @@ rounds:
 				sr.ID,
 				roundNum,
 				outcome,
-				sctx.Fixing,
 				run.HeadSHA,
-				sctx.FixSessionID,
 			)
 			if ledgerErr != nil {
 				slog.Warn("failed to process round findings in finding ledger", "step", stepName, "error", ledgerErr)
@@ -1192,7 +1199,7 @@ rounds:
 			}
 		}
 
-		if !outcome.NeedsApproval && !hasAskUserFindingsJSON(effectiveFindings) && !hasBlockingFindingsJSON(effectiveFindings) && (!carryFindings || !hasSelectedFindingsJSON(effectiveFindings, selectedOutstandingIDs)) {
+		if !outcome.NeedsApproval && !hasAskUserFindingsJSON(effectiveFindings) && !hasBlockingFindingsJSON(effectiveFindings) && !ledgerRequiresDisposition(effectiveFindings) && (!carryFindings || !hasSelectedFindingsJSON(effectiveFindings, selectedOutstandingIDs)) {
 			// Step completed without needing approval.
 			// Any remaining info-only or non-blocking findings
 			// are acceptable and don't block the pipeline.
@@ -1339,9 +1346,6 @@ rounds:
 					selectedOutstandingIDs = combineFindingIDLists(selectedOutstandingIDs, newPendingIDs)
 				}
 				allSelectedIDs := combineSelectedFindingIDs(response.findingIDs, selectedForPersistence)
-				if len(allSelectedIDs) == 0 && len(response.addedFindings) == 0 {
-					allSelectedIDs = extractFindingIDs(effectiveFindings)
-				}
 				if e.findingLedger != nil {
 					if len(response.addedFindings) > 0 {
 						if parsedMerged, parseErr := types.ParseFindingsJSON(mergedFindings); parseErr == nil {

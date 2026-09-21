@@ -376,7 +376,7 @@ func ciFixAgentTimeoutOutcome(issueDesc string, leftover string, err error) *pip
 	findings := Findings{
 		Summary: "CI auto-fix agent exceeded its invocation budget",
 		Items: []Finding{{
-			ID:          "ci-fix-agent-timeout",
+			ID:          types.FindingIDCIFixAgentTimeout,
 			Severity:    "warning",
 			Description: description,
 			Action:      types.ActionAskUser,

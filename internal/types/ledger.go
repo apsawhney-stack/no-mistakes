@@ -110,7 +110,13 @@ type FindingLedgerEvent struct {
 	CreatedAt    int64    `json:"created_at"`
 }
 
-// FindingLedgerSummary provides a versioned summary of the durable ledger for a run.
+// FindingLedgerSummary is the versioned, publishable view of one run's durable
+// finding ledger. Counts cover every entry ever admitted; Entries carries only
+// the unresolved ones (open, pending verification, reconciliation required),
+// because that is what a gate, a status reader, or a terminal-acceptance check
+// needs and because it bounds what a summary may embed in a step's findings JSON
+// or an IPC frame. Closed entries remain readable per-run through the database
+// and are counted, never dropped, here.
 type FindingLedgerSummary struct {
 	ProtocolVersion string                      `json:"protocol_version"`
 	RunID           string                      `json:"run_id"`
@@ -121,6 +127,15 @@ type FindingLedgerSummary struct {
 	ClosedCount     int                         `json:"closed_count"`
 	HasBlocking     bool                        `json:"has_blocking"`
 	Entries         []FindingLedgerEntrySummary `json:"entries,omitempty"`
+}
+
+// Unresolved returns the number of entries the protocol still requires a
+// disposition for.
+func (s *FindingLedgerSummary) Unresolved() int {
+	if s == nil {
+		return 0
+	}
+	return s.OpenCount + s.PendingCount + s.ReconcileCount
 }
 
 // FindingLedgerEntrySummary is a compact representation of a ledger entry in protocol summaries.

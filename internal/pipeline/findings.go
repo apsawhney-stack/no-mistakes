@@ -778,20 +778,3 @@ func filterFindingsJSON(raw string, ids []string) string {
 	}
 	return filteredRaw
 }
-
-func extractFindingIDs(raw string) []string {
-	if raw == "" {
-		return nil
-	}
-	findings, err := types.ParseFindingsJSON(raw)
-	if err != nil {
-		return nil
-	}
-	ids := make([]string, 0, len(findings.Items))
-	for _, item := range findings.Items {
-		if item.ID != "" {
-			ids = append(ids, item.ID)
-		}
-	}
-	return ids
-}

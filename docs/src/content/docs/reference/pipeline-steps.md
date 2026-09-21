@@ -31,6 +31,8 @@ Review flags every newly added violation and requires same-pattern tests encount
 
 ## Finding decision history
 
+Every reported finding is tracked in a versioned, durable per-run ledger until something positively disposes of it. [Finding Ledger Protocol](/no-mistakes/reference/finding-ledger/) owns entry identity, statuses, closure proofs, CI check supersession, and legacy import.
+
 When a human resolves a findings gate with Approve, Skip, or Abort without selecting a fix, no-mistakes records that the round's findings were declined. A gate with no findings records no decision. When the human selects only some findings to fix, the unselected complement is recorded as declined; findings merely left out by automatic filtering remain undecided.
 
 Review, Test, Document, Lint, CI, and repository gate fix agent prompts receive a sanitized history containing the current step's earlier rounds, decisions from other steps in the same run, and a bounded window of decisions from earlier runs on the same branch. A recorded decision takes precedence over conflicting user-intent wording, and later decisions about the same concern supersede earlier ones. Completing Review does not clear branch decisions.

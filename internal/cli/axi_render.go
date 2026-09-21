@@ -504,11 +504,15 @@ func runObjectFieldWithKey(key string, rv runView) toon.Field {
 	}
 	fields = append(fields, toon.Field{Key: "findings", Value: rv.findingsTally()})
 	if rv.FindingLedger != nil && rv.FindingLedger.TotalEntries > 0 {
+		// The versioned summary's blocking counts ride every status read, so an
+		// unattended caller can tell "nothing outstanding" from "waiting for a
+		// decision" without parsing the step payloads.
 		fields = append(fields, toon.Field{Key: "finding_ledger", Value: toon.NewObject(
 			toon.Field{Key: "version", Value: rv.FindingLedger.ProtocolVersion},
 			toon.Field{Key: "total", Value: rv.FindingLedger.TotalEntries},
 			toon.Field{Key: "open", Value: rv.FindingLedger.OpenCount},
 			toon.Field{Key: "pending", Value: rv.FindingLedger.PendingCount},
+			toon.Field{Key: "reconcile", Value: rv.FindingLedger.ReconcileCount},
 			toon.Field{Key: "closed", Value: rv.FindingLedger.ClosedCount},
 		)})
 	}

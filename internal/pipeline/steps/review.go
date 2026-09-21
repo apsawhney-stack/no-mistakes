@@ -402,11 +402,19 @@ Risk assessment (after listing all findings):
 		Workload:   workload,
 	}
 	var findings Findings
+	// The session identity of the review turn that actually validated, plus
+	// whether it continued an existing session. Both are reported on the outcome
+	// so the finding ledger can prove the closure review did not resume the
+	// session that applied the fix under review.
+	reviewSessionID := ""
+	reviewSessionResumed := false
 	for attempt := 1; ; attempt++ {
 		result, err := s.runReviewAgent(sctx, "agent review", "", opts)
 		if err == nil {
 			findings, err = parseReviewAnalyzerOutput(result)
 			if err == nil {
+				reviewSessionID = result.SessionID
+				reviewSessionResumed = result.Resumed
 				break
 			}
 		} else if !agent.IsStructuredOutputRejected(err) || sctx.Ctx.Err() != nil || errors.Is(err, errReviewAgentTimeout) {
@@ -444,12 +452,14 @@ Risk assessment (after listing all findings):
 	findingsJSON, _ := json.Marshal(findings)
 
 	return approvedReviewOutcome(reviewTargetSHA, &pipeline.StepOutcome{
-		NeedsApproval:   needsApproval,
-		AutoFixable:     len(findings.Items) > 0,
-		Findings:        string(findingsJSON),
-		ReviewedPaths:   findings.ReviewedPaths,
-		ReviewablePaths: reviewable,
-		FixSummary:      fixSummary,
+		NeedsApproval:       needsApproval,
+		AutoFixable:         len(findings.Items) > 0,
+		Findings:            string(findingsJSON),
+		ReviewedPaths:       findings.ReviewedPaths,
+		ReviewablePaths:     reviewable,
+		FixSummary:          fixSummary,
+		AgentSessionID:      reviewSessionID,
+		AgentSessionResumed: reviewSessionResumed,
 	})
 }
 

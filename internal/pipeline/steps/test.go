@@ -242,7 +242,7 @@ Rules:
 		evidenceGuidance,
 		reassessHistory,
 	)
-	findings, err := runTestAnalyzer(sctx, evidencePrompt)
+	findings, evidenceSessionID, evidenceSessionResumed, err := runTestAnalyzer(sctx, evidencePrompt)
 	if err != nil {
 		if errors.Is(err, errTestAgentTimeout) {
 			outcome := testAgentTimeoutOutcome(sctx, err, startHead, baselineFindings, baselineSummary, baselineExitCode)
@@ -280,11 +280,13 @@ Rules:
 
 	findingsJSON, _ := json.Marshal(findings)
 	return &pipeline.StepOutcome{
-		NeedsApproval: needsApproval,
-		AutoFixable:   autoFixable,
-		Findings:      string(findingsJSON),
-		ExitCode:      baselineExitCode,
-		FixSummary:    fixSummary,
+		NeedsApproval:       needsApproval,
+		AutoFixable:         autoFixable,
+		Findings:            string(findingsJSON),
+		ExitCode:            baselineExitCode,
+		FixSummary:          fixSummary,
+		AgentSessionID:      evidenceSessionID,
+		AgentSessionResumed: evidenceSessionResumed,
 	}, nil
 }
 
@@ -297,7 +299,12 @@ Rules:
 // than correcting structured output.
 const testAnalyzerMaxAttempts = 3
 
-func runTestAnalyzer(sctx *pipeline.StepContext, prompt string) (Findings, error) {
+// runTestAnalyzer drives the live-validation evidence turn, returning the
+// validated findings plus the agent session identity of the turn that produced
+// them. The identity is evidence, not control flow: the finding ledger records
+// it with any closure so a reader can see which independent turn certified a
+// fix. A session-free adapter reports "".
+func runTestAnalyzer(sctx *pipeline.StepContext, prompt string) (Findings, string, bool, error) {
 	current := prompt
 	var lastErr error
 	for attempt := 1; attempt <= testAnalyzerMaxAttempts; attempt++ {
@@ -319,7 +326,7 @@ func runTestAnalyzer(sctx *pipeline.StepContext, prompt string) (Findings, error
 		runErr := testAgentError(evidenceCtx, timeout, "agent run tests", err)
 		if runErr != nil && (context.Cause(evidenceCtx) != nil || !agent.IsStructuredOutputRejected(runErr)) {
 			cancel()
-			return Findings{}, runErr
+			return Findings{}, "", false, runErr
 		}
 		cancel()
 
@@ -333,7 +340,7 @@ func runTestAnalyzer(sctx *pipeline.StepContext, prompt string) (Findings, error
 			var findings Findings
 			findings, valErr = parseTestAnalyzerOutput(result)
 			if valErr == nil {
-				return findings, nil
+				return findings, result.SessionID, result.Resumed, nil
 			}
 		}
 		lastErr = valErr
@@ -346,7 +353,7 @@ func runTestAnalyzer(sctx *pipeline.StepContext, prompt string) (Findings, error
 		}
 		current = testAnalyzerCorrectionPrompt(valErr, rejected)
 	}
-	return Findings{}, fmt.Errorf("validate test analyzer findings after %d attempts: %w", testAnalyzerMaxAttempts, lastErr)
+	return Findings{}, "", false, fmt.Errorf("validate test analyzer findings after %d attempts: %w", testAnalyzerMaxAttempts, lastErr)
 }
 
 func parseTestAnalyzerOutput(result *agent.Result) (Findings, error) {

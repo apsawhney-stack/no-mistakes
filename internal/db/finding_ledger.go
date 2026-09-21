@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"sort"
 
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -275,8 +276,37 @@ func (d *DB) GetFindingLedgerEventsByRun(runID string) ([]*types.FindingLedgerEv
 }
 
 // GetFindingLedgerSummary compiles a versioned ledger summary for a run.
+//
+// The counts cover every entry the run has ever recorded, but Entries carries
+// only the UNRESOLVED ones (open, pending verification, reconciliation
+// required). That is the protocol's publishable surface - "what still blocks
+// this run" - and keeping it to unresolved entries bounds every consumer that
+// embeds a summary: the per-step findings JSON, the run/step IPC payloads, and
+// the axi gate and status renders. Closed entries stay fully readable in the
+// database (GetFindingLedgerEntries) and in the step's own round history; they
+// are counted here rather than re-published, so a long review loop cannot grow
+// a status frame without bound.
 func (d *DB) GetFindingLedgerSummary(runID string) (*types.FindingLedgerSummary, error) {
-	entries, err := d.GetFindingLedgerEntries(runID)
+	return d.findingLedgerSummary(runID, "")
+}
+
+// GetFindingLedgerSummaryForStep is GetFindingLedgerSummary restricted to one
+// step's entries. A step's own findings payload reports what that step still
+// has to dispose of, without claiming entries owned by another step.
+func (d *DB) GetFindingLedgerSummaryForStep(runID string, stepName types.StepName) (*types.FindingLedgerSummary, error) {
+	return d.findingLedgerSummary(runID, stepName)
+}
+
+func (d *DB) findingLedgerSummary(runID string, stepName types.StepName) (*types.FindingLedgerSummary, error) {
+	var (
+		entries []*types.FindingLedgerEntry
+		err     error
+	)
+	if stepName == "" {
+		entries, err = d.GetFindingLedgerEntries(runID)
+	} else {
+		entries, err = d.GetFindingLedgerEntriesByStep(runID, stepName)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -302,7 +332,10 @@ func (d *DB) GetFindingLedgerSummary(runID string) (*types.FindingLedgerSummary,
 				summary.ClosedCount++
 			}
 		}
-		if types.IsUnresolvedLedgerStatus(e.Status) && e.IsBlocking {
+		if !types.IsUnresolvedLedgerStatus(e.Status) {
+			continue
+		}
+		if e.IsBlocking {
 			summary.HasBlocking = true
 		}
 		summary.Entries = append(summary.Entries, types.FindingLedgerEntrySummary{
@@ -325,321 +358,384 @@ func (d *DB) GetFindingLedgerSummary(runID string) (*types.FindingLedgerSummary,
 	return summary, nil
 }
 
-// migrateLegacyFindingLedger imports pre-ledger historical and active run records
-// into finding_ledger_entries and finding_ledger_events idempotently.
-func (d *DB) migrateLegacyFindingLedger() error {
-	// 1. Identify runs already migrated.
-	migratedRuns := make(map[string]bool)
-	rows, err := d.sql.Query(`SELECT DISTINCT run_id FROM finding_ledger_entries`)
-	if err != nil {
-		return fmt.Errorf("check migrated runs: %w", err)
-	}
-	for rows.Next() {
-		var rid string
-		if err := rows.Scan(&rid); err == nil {
-			migratedRuns[rid] = true
-		}
-	}
-	rows.Close()
-
-	// 2. Query all runs.
-	runRows, err := d.sql.Query(`SELECT id, repo_id, status, created_at FROM runs ORDER BY created_at ASC`)
-	if err != nil {
-		return fmt.Errorf("query runs for migration: %w", err)
-	}
-	defer runRows.Close()
-
-	type runMeta struct {
-		id        string
-		repoID    string
-		status    string
-		createdAt int64
-	}
-	var runs []runMeta
-	for runRows.Next() {
-		var rm runMeta
-		if err := runRows.Scan(&rm.id, &rm.repoID, &rm.status, &rm.createdAt); err == nil {
-			runs = append(runs, rm)
-		}
-	}
-	if err := runRows.Err(); err != nil {
-		return err
-	}
-
-	for _, r := range runs {
-		if migratedRuns[r.id] {
-			continue
-		}
-		if err := d.MigrateLegacyFindingLedgerForRun(r.id); err != nil {
-			return fmt.Errorf("migrate run %s: %w", r.id, err)
-		}
-	}
-	return nil
-}
-
-// MigrateLegacyFindingLedgerForRun migrates pre-ledger findings for a single run
-// if it has not yet been migrated into finding_ledger_entries.
+// MigrateLegacyFindingLedgerForRun imports a pre-ledger active run's persisted
+// round and finding records into the durable ledger exactly once.
+//
+// Idempotency is owned by the finding_ledger_migrations marker, not by the
+// presence of imported entries: a crash midway through an import leaves partial
+// entries behind, and re-running must complete that run's history rather than
+// skip it. The whole import (entries, events, and the marker) is one
+// transaction, so an interrupted import leaves nothing behind at all and a
+// retry starts clean. A terminal run is refused outright: completed history is
+// historical and is never relabelled here.
 func (d *DB) MigrateLegacyFindingLedgerForRun(runID string) error {
 	if runID == "" {
 		return nil
 	}
-	var count int
-	if err := d.sql.QueryRow(`SELECT COUNT(*) FROM finding_ledger_entries WHERE run_id = ?`, runID).Scan(&count); err != nil {
-		return err
+	var migrated int
+	if err := d.sql.QueryRow(`SELECT COUNT(*) FROM finding_ledger_migrations WHERE run_id = ?`, runID).Scan(&migrated); err != nil {
+		return fmt.Errorf("check finding ledger migration marker: %w", err)
 	}
-	if count > 0 {
+	if migrated > 0 {
 		return nil
 	}
 	run, err := d.GetRun(runID)
 	if err != nil || run == nil {
 		return err
 	}
-	return d.migrateOneRun(run.ID, run.RepoID, string(run.Status), run.CreatedAt)
-}
+	if types.RunStatus(run.Status).Terminal() {
+		return nil
+	}
 
-func (d *DB) migrateOneRun(runID, repoID, runStatus string, runCreatedAt int64) error {
-	steps, err := d.GetStepsByRun(runID)
+	// Plan first, write second. The plan's reads must finish before the write
+	// transaction opens: SQLite serializes a writer against readers on other
+	// pooled connections, so a read through d.sql inside the transaction would
+	// deadlock against the transaction itself.
+	entries, events, err := d.planLegacyMigration(run.ID, run.RepoID, run.CreatedAt)
 	if err != nil {
 		return err
 	}
 
-	isActive := runStatus == string(types.RunRunning) || runStatus == string(types.RunPending)
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return fmt.Errorf("begin finding ledger migration: %w", err)
+	}
+	defer tx.Rollback()
 
+	if err := writeLegacyMigrationTx(tx, entries, events); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(
+		`INSERT INTO finding_ledger_migrations (run_id, protocol_version, imported_at) VALUES (?, ?, ?)`,
+		runID, types.FindingLedgerProtocolVersion, now(),
+	); err != nil {
+		return fmt.Errorf("record finding ledger migration marker: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit finding ledger migration: %w", err)
+	}
+	return nil
+}
+
+// planLegacyMigration reads one active run's persisted step/round findings and
+// produces the ledger entries and events an import would write.
+//
+// It is deliberately read-only and completes before any transaction opens. The
+// import's reads (steps, rounds) and its writes (entries, events, marker) must
+// not overlap: SQLite serializes a writer against readers on other pooled
+// connections, so reading through d.sql while a write transaction is open
+// deadlocks against the import's own transaction.
+//
+// Two shapes are produced, and neither invents a closure:
+//
+//   - A finding reported in an earlier round but absent from the run's latest
+//     round becomes needs_reconciliation. The pre-ledger engine could not say
+//     why it stopped being reported, so the imported entry says exactly that
+//     instead of guessing "fixed".
+//   - Everything else stays open and blocking. The live ledger then disposes of
+//     it through the ordinary round/selection/closure path.
+//
+// A completed run never reaches this function (see MigrateLegacyFindingLedgerForRun).
+func (d *DB) planLegacyMigration(runID, repoID string, runCreatedAt int64) ([]*types.FindingLedgerEntry, []*types.FindingLedgerEvent, error) {
+	steps, err := d.GetStepsByRun(runID)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var entries []*types.FindingLedgerEntry
+	var events []*types.FindingLedgerEvent
 	for _, step := range steps {
 		rounds, err := d.GetRoundsByStep(step.ID)
 		if err != nil {
-			return err
+			return nil, nil, err
 		}
-		if len(rounds) == 0 {
-			// No rounds; check if step has findings_json directly.
-			if step.FindingsJSON != nil && *step.FindingsJSON != "" {
-				if findings, parseErr := types.ParseFindingsJSON(*step.FindingsJSON); parseErr == nil {
-					for _, item := range findings.Items {
-						entryID := "fn-" + newID()
-						fingerprint := types.NormalizeFingerprint(item)
-						itemJSON, _ := json.Marshal(item)
-						status := types.FindingLedgerStatusOpen
-						if !isActive {
-							status = types.FindingLedgerStatusClosedAccepted
-						}
-						isBlocking := types.IsBlockingFinding(item)
-						e := &types.FindingLedgerEntry{
-							ID:                    entryID,
-							RunID:                 runID,
-							RepoID:                repoID,
-							StepName:              step.StepName,
-							FirstSeenRound:        1,
-							FirstSeenStepResultID: step.ID,
-							ReportedID:            item.ID,
-							Fingerprint:           fingerprint,
-							Severity:              item.Severity,
-							Action:                item.ActionOrDefault(),
-							File:                  item.File,
-							Line:                  item.Line,
-							Description:           item.Description,
-							Category:              item.Category,
-							Check:                 item.Check,
-							CheckID:               item.CheckID,
-							DecisionID:            item.DecisionID,
-							Source:                item.Source,
-							UserInstructions:      item.UserInstructions,
-							ReviewScope:           item.ReviewScope,
-							OriginalFindingJSON:   string(itemJSON),
-							CurrentFindingJSON:    string(itemJSON),
-							Status:                status,
-							IsBlocking:            isBlocking,
-							DispositionProvenance: "legacy_migration",
-							LastObservedRound:     1,
-							LastObservedFile:      item.File,
-							LastObservedLine:      item.Line,
-							CreatedAt:             runCreatedAt,
-							UpdatedAt:             runCreatedAt,
-						}
-						if err := d.InsertFindingLedgerEntry(e); err != nil {
-							return err
-						}
-						ev := &types.FindingLedgerEvent{
-							EntryID:      entryID,
-							RunID:        runID,
-							StepName:     step.StepName,
-							Round:        1,
-							StepResultID: step.ID,
-							EventType:    types.FindingEventAdmitted,
-							StateBefore:  "",
-							StateAfter:   status,
-							Provenance:   "legacy_migration",
-							CreatedAt:    runCreatedAt,
-						}
-						if err := d.RecordFindingLedgerEvent(ev); err != nil {
-							return err
-						}
-					}
-				}
-			}
+		stepEntries, stepEvents, err := planStepMigration(runID, repoID, step, rounds, runCreatedAt)
+		if err != nil {
+			return nil, nil, err
+		}
+		entries = append(entries, stepEntries...)
+		events = append(events, stepEvents...)
+	}
+	return entries, events, nil
+}
+
+// planStepMigration plans one step's import from either its findings_json (no
+// rounds recorded) or its round history.
+func planStepMigration(runID, repoID string, step *StepResult, rounds []*StepRound, runCreatedAt int64) ([]*types.FindingLedgerEntry, []*types.FindingLedgerEvent, error) {
+	if len(rounds) == 0 {
+		return planStepFindingsMigration(runID, repoID, step, runCreatedAt)
+	}
+	return planStepRoundsMigration(runID, repoID, step, rounds, runCreatedAt)
+}
+
+// planStepFindingsMigration imports a step that holds findings without round rows.
+func planStepFindingsMigration(runID, repoID string, step *StepResult, runCreatedAt int64) ([]*types.FindingLedgerEntry, []*types.FindingLedgerEvent, error) {
+	if step.FindingsJSON == nil || *step.FindingsJSON == "" {
+		return nil, nil, nil
+	}
+	findings, parseErr := types.ParseFindingsJSON(*step.FindingsJSON)
+	if parseErr != nil {
+		return nil, nil, nil
+	}
+	var entries []*types.FindingLedgerEntry
+	var events []*types.FindingLedgerEvent
+	for _, item := range findings.Items {
+		if types.IsStepOwnedFinding(item) {
+			// Step-owned operator parks keep their existing owner and are never
+			// imported; the step re-derives them from live state. See
+			// types.IsStepOwnedFinding.
+			continue
+		}
+		entry := legacyEntry(runID, repoID, step, step.StepName, 1, item, runCreatedAt)
+		entries = append(entries, entry)
+		events = append(events, legacyAdmittedEvent(entry, step.ID, 1, runCreatedAt))
+	}
+	return entries, events, nil
+}
+
+// planStepRoundsMigration walks a step's rounds oldest-first, preserving the
+// distinction between "reported again" and "a new, distinct finding".
+func planStepRoundsMigration(runID, repoID string, step *StepResult, rounds []*StepRound, runCreatedAt int64) ([]*types.FindingLedgerEntry, []*types.FindingLedgerEvent, error) {
+	type trackedEntry struct {
+		entry         *types.FindingLedgerEntry
+		lastSeenRound int
+	}
+	byFingerprint := make(map[string]*trackedEntry)
+
+	latestRoundNum := 0
+	for _, round := range rounds {
+		if round.Round > latestRoundNum {
+			latestRoundNum = round.Round
+		}
+	}
+
+	var entries []*types.FindingLedgerEntry
+	var events []*types.FindingLedgerEvent
+	for _, round := range rounds {
+		if round.FindingsJSON == nil || *round.FindingsJSON == "" {
+			continue
+		}
+		findings, parseErr := types.ParseFindingsJSON(*round.FindingsJSON)
+		if parseErr != nil {
 			continue
 		}
 
-		// Step has recorded rounds.
-		// Track entries created for this step by fingerprint.
-		type trackedEntry struct {
-			entry             *types.FindingLedgerEntry
-			lastSeenRound     int
-			seenInLatestRound bool
+		roundCounts := make(map[string]int)
+		for _, item := range findings.Items {
+			roundCounts[types.NormalizeFingerprint(item)]++
 		}
-		byFingerprint := make(map[string]*trackedEntry)
 
-		for _, round := range rounds {
-			if round.FindingsJSON == nil || *round.FindingsJSON == "" {
+		for _, item := range findings.Items {
+			if types.IsStepOwnedFinding(item) {
+				// Step-owned operator parks are re-derived from live state by
+				// their step and are never imported. See types.IsStepOwnedFinding.
 				continue
 			}
-			findings, parseErr := types.ParseFindingsJSON(*round.FindingsJSON)
-			if parseErr != nil {
+			fp := types.NormalizeFingerprint(item)
+			existing := byFingerprint[fp]
+			// Only an unambiguous 1-to-1 fingerprint match continues an entry.
+			// Anything else is a distinct finding, so two rounds that both called
+			// something F1 are never merged by position or by a shared label.
+			if existing != nil && roundCounts[fp] == 1 {
+				existing.lastSeenRound = round.Round
+				existing.entry.LastObservedRound = round.Round
+				existing.entry.LastObservedFile = item.File
+				existing.entry.LastObservedLine = item.Line
+				itemJSON, _ := json.Marshal(item)
+				existing.entry.CurrentFindingJSON = string(itemJSON)
+				existing.entry.UpdatedAt = round.CreatedAt
+				events = append(events, &types.FindingLedgerEvent{
+					EntryID:      existing.entry.ID,
+					RunID:        runID,
+					StepName:     step.StepName,
+					Round:        round.Round,
+					StepResultID: step.ID,
+					EventType:    types.FindingEventReportedAgain,
+					StateBefore:  existing.entry.Status,
+					StateAfter:   existing.entry.Status,
+					Provenance:   "legacy_migration",
+					CreatedAt:    round.CreatedAt,
+				})
 				continue
 			}
 
-			roundCounts := make(map[string]int)
-			for _, item := range findings.Items {
-				roundCounts[types.NormalizeFingerprint(item)]++
-			}
-
-			for _, item := range findings.Items {
-				fp := types.NormalizeFingerprint(item)
-				existing := byFingerprint[fp]
-				// Only match if unambiguous (count == 1).
-				if existing != nil && roundCounts[fp] == 1 {
-					existing.lastSeenRound = round.Round
-					existing.entry.LastObservedRound = round.Round
-					existing.entry.LastObservedFile = item.File
-					existing.entry.LastObservedLine = item.Line
-					itemJSON, _ := json.Marshal(item)
-					existing.entry.CurrentFindingJSON = string(itemJSON)
-					ev := &types.FindingLedgerEvent{
-						EntryID:      existing.entry.ID,
-						RunID:        runID,
-						StepName:     step.StepName,
-						Round:        round.Round,
-						StepResultID: step.ID,
-						EventType:    types.FindingEventReportedAgain,
-						StateBefore:  existing.entry.Status,
-						StateAfter:   existing.entry.Status,
-						Provenance:   "legacy_migration",
-						CreatedAt:    round.CreatedAt,
-					}
-					_ = d.RecordFindingLedgerEvent(ev)
-				} else {
-					// New finding or ambiguous match -> assign new distinct ledger ID.
-					entryID := "fn-" + newID()
-					itemJSON, _ := json.Marshal(item)
-					isBlocking := types.IsBlockingFinding(item)
-					e := &types.FindingLedgerEntry{
-						ID:                    entryID,
-						RunID:                 runID,
-						RepoID:                repoID,
-						StepName:              step.StepName,
-						FirstSeenRound:        round.Round,
-						FirstSeenStepResultID: step.ID,
-						ReportedID:            item.ID,
-						Fingerprint:           fp,
-						Severity:              item.Severity,
-						Action:                item.ActionOrDefault(),
-						File:                  item.File,
-						Line:                  item.Line,
-						Description:           item.Description,
-						Category:              item.Category,
-						Check:                 item.Check,
-						CheckID:               item.CheckID,
-						DecisionID:            item.DecisionID,
-						Source:                item.Source,
-						UserInstructions:      item.UserInstructions,
-						ReviewScope:           item.ReviewScope,
-						OriginalFindingJSON:   string(itemJSON),
-						CurrentFindingJSON:    string(itemJSON),
-						Status:                types.FindingLedgerStatusOpen,
-						IsBlocking:            isBlocking,
-						LastObservedRound:     round.Round,
-						LastObservedFile:      item.File,
-						LastObservedLine:      item.Line,
-						CreatedAt:             round.CreatedAt,
-						UpdatedAt:             round.CreatedAt,
-					}
-					te := &trackedEntry{entry: e, lastSeenRound: round.Round}
-					if roundCounts[fp] == 1 {
-						byFingerprint[fp] = te
-					} else {
-						// Ambiguous within the same round: store under a unique key so both are tracked distinctly.
-						byFingerprint[fmt.Sprintf("%s|#%s", fp, entryID)] = te
-					}
-					if err := d.InsertFindingLedgerEntry(e); err != nil {
-						return err
-					}
-					ev := &types.FindingLedgerEvent{
-						EntryID:      entryID,
-						RunID:        runID,
-						StepName:     step.StepName,
-						Round:        round.Round,
-						StepResultID: step.ID,
-						EventType:    types.FindingEventAdmitted,
-						StateBefore:  "",
-						StateAfter:   types.FindingLedgerStatusOpen,
-						Provenance:   "legacy_migration",
-						CreatedAt:    round.CreatedAt,
-					}
-					_ = d.RecordFindingLedgerEvent(ev)
-				}
-			}
-		}
-
-		// Final pass over all tracked entries for this step to determine final status.
-		latestRoundNum := 0
-		for _, round := range rounds {
-			if round.Round > latestRoundNum {
-				latestRoundNum = round.Round
-			}
-		}
-
-		for _, te := range byFingerprint {
-			if !isActive {
-				// Completed legacy run: preserve historical state without fabricating closure proof.
-				if te.lastSeenRound < latestRoundNum {
-					// Disappeared before final round in completed run.
-					te.entry.Status = types.FindingLedgerStatusClosedAccepted
-					te.entry.DispositionProvenance = "legacy_completed_run"
-					te.entry.ClosureReason = "historical legacy run resolution"
-				} else {
-					// Still in final round of completed run (e.g. approved gate with findings).
-					te.entry.Status = types.FindingLedgerStatusClosedAccepted
-					te.entry.DispositionProvenance = "legacy_completed_run"
-					te.entry.ClosureReason = "historical completed run gate acceptance"
-				}
-				_ = d.UpdateFindingLedgerEntry(te.entry)
+			entry := legacyEntry(runID, repoID, step, step.StepName, round.Round, item, round.CreatedAt)
+			entries = append(entries, entry)
+			events = append(events, legacyAdmittedEvent(entry, step.ID, round.Round, round.CreatedAt))
+			te := &trackedEntry{entry: entry, lastSeenRound: round.Round}
+			if roundCounts[fp] == 1 {
+				byFingerprint[fp] = te
 			} else {
-				// Active pre-ledger run:
-				// If a finding was reported in an earlier round but disappeared in a later round
-				// without verified closure proof, it MUST BE marked needs_reconciliation!
-				if te.lastSeenRound < latestRoundNum {
-					te.entry.Status = types.FindingLedgerStatusNeedsReconciliation
-					te.entry.ClosureReason = fmt.Sprintf("unverified omission in pre-ledger round (last seen round %d, current round %d); requires reconciliation", te.lastSeenRound, latestRoundNum)
-					te.entry.DispositionProvenance = "legacy_active_migration"
-					_ = d.UpdateFindingLedgerEntry(te.entry)
-
-					ev := &types.FindingLedgerEvent{
-						EntryID:      te.entry.ID,
-						RunID:        runID,
-						StepName:     step.StepName,
-						Round:        latestRoundNum,
-						StepResultID: step.ID,
-						EventType:    types.FindingEventNeedsReconciliation,
-						StateBefore:  types.FindingLedgerStatusOpen,
-						StateAfter:   types.FindingLedgerStatusNeedsReconciliation,
-						Reason:       te.entry.ClosureReason,
-						Provenance:   "legacy_active_migration",
-						CreatedAt:    now(),
-					}
-					_ = d.RecordFindingLedgerEvent(ev)
-				}
+				// Ambiguous within the same round: track each distinctly so neither
+				// absorbs the other's later observation.
+				byFingerprint[fmt.Sprintf("%s|#%s", fp, entry.ID)] = te
 			}
 		}
 	}
 
+	// An active run's pre-ledger omission is unexplained, so it is imported as
+	// reconciliation-required rather than inferred closed. Sorted by entry ID so
+	// the plan (and therefore the retry) is deterministic.
+	var omitted []*trackedEntry
+	for _, te := range byFingerprint {
+		if te.lastSeenRound < latestRoundNum {
+			omitted = append(omitted, te)
+		}
+	}
+	sort.Slice(omitted, func(i, j int) bool { return omitted[i].entry.ID < omitted[j].entry.ID })
+	for _, te := range omitted {
+		reason := fmt.Sprintf("unverified omission in pre-ledger round (last seen round %d, current round %d); requires reconciliation", te.lastSeenRound, latestRoundNum)
+		te.entry.Status = types.FindingLedgerStatusNeedsReconciliation
+		te.entry.ClosureReason = reason
+		te.entry.DispositionProvenance = "legacy_active_migration"
+		// The entry pointer is already in entries: it was appended when the
+		// finding was first admitted. Mutating it updates the plan in place.
+		events = append(events, &types.FindingLedgerEvent{
+			EntryID:     te.entry.ID,
+			RunID:       runID,
+			StepName:    step.StepName,
+			Round:       latestRoundNum,
+			EventType:   types.FindingEventNeedsReconciliation,
+			StateBefore: types.FindingLedgerStatusOpen,
+			StateAfter:  types.FindingLedgerStatusNeedsReconciliation,
+			Reason:      reason,
+			Provenance:  "legacy_active_migration",
+			CreatedAt:   now(),
+		})
+	}
+	return entries, events, nil
+}
+
+func legacyAdmittedEvent(entry *types.FindingLedgerEntry, stepResultID string, round int, createdAt int64) *types.FindingLedgerEvent {
+	return &types.FindingLedgerEvent{
+		EntryID:      entry.ID,
+		RunID:        entry.RunID,
+		StepName:     entry.StepName,
+		Round:        round,
+		StepResultID: stepResultID,
+		EventType:    types.FindingEventAdmitted,
+		StateBefore:  "",
+		StateAfter:   types.FindingLedgerStatusOpen,
+		Provenance:   "legacy_migration",
+		CreatedAt:    createdAt,
+	}
+}
+
+// legacyEntry builds the ledger entry an imported pre-ledger finding becomes.
+// It is always open: nothing in the pre-ledger record is acceptance evidence.
+func legacyEntry(runID, repoID string, step *StepResult, stepName types.StepName, round int, item types.Finding, createdAt int64) *types.FindingLedgerEntry {
+	itemJSON, _ := json.Marshal(item)
+	return &types.FindingLedgerEntry{
+		ID:                    "fn-" + newID(),
+		RunID:                 runID,
+		RepoID:                repoID,
+		StepName:              stepName,
+		FirstSeenRound:        round,
+		FirstSeenStepResultID: step.ID,
+		ReportedID:            item.ID,
+		Fingerprint:           types.NormalizeFingerprint(item),
+		Severity:              item.Severity,
+		Action:                item.ActionOrDefault(),
+		File:                  item.File,
+		Line:                  item.Line,
+		Description:           item.Description,
+		Category:              item.Category,
+		Check:                 item.Check,
+		CheckID:               item.CheckID,
+		DecisionID:            item.DecisionID,
+		Source:                item.Source,
+		UserInstructions:      item.UserInstructions,
+		ReviewScope:           item.ReviewScope,
+		OriginalFindingJSON:   string(itemJSON),
+		CurrentFindingJSON:    string(itemJSON),
+		Status:                types.FindingLedgerStatusOpen,
+		IsBlocking:            types.IsBlockingFinding(item),
+		LastObservedRound:     round,
+		LastObservedFile:      item.File,
+		LastObservedLine:      item.Line,
+		CreatedAt:             createdAt,
+		UpdatedAt:             createdAt,
+	}
+}
+
+// writeLegacyMigrationTx writes a planned import as one transaction. Callers
+// must have finished every read before arriving here.
+func writeLegacyMigrationTx(tx *sql.Tx, entries []*types.FindingLedgerEntry, events []*types.FindingLedgerEvent) error {
+	for _, entry := range entries {
+		if err := insertLedgerEntryTx(tx, entry); err != nil {
+			return err
+		}
+	}
+	for _, event := range events {
+		if err := insertLedgerEventTx(tx, event); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// insertLedgerEntryTx and insertLedgerEventTx are the transactional half of the
+// ledger writers, used so an import is all-or-nothing. The non-transactional
+// methods above are the live round paths.
+func insertLedgerEntryTx(tx *sql.Tx, entry *types.FindingLedgerEntry) error {
+	if entry.ID == "" {
+		entry.ID = "fn-" + newID()
+	}
+	if entry.CreatedAt == 0 {
+		entry.CreatedAt = now()
+	}
+	if entry.UpdatedAt == 0 {
+		entry.UpdatedAt = entry.CreatedAt
+	}
+	isBlockingInt := 0
+	if entry.IsBlocking {
+		isBlockingInt = 1
+	}
+	_, err := tx.Exec(
+		`INSERT INTO finding_ledger_entries (
+			id, run_id, repo_id, step_name, first_seen_round, first_seen_step_result_id,
+			reported_id, fingerprint, severity, action, file, line, description,
+			category, check_name, check_id, decision_id, source, user_instructions,
+			review_scope, original_finding_json, current_finding_json, status,
+			is_blocking, selected_in_round, correcting_commit_sha, fix_session_id, closed_in_round,
+			closure_evidence, closure_reason, disposition_provenance,
+			last_observed_round, last_observed_file, last_observed_line,
+			created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		entry.ID, entry.RunID, entry.RepoID, string(entry.StepName), entry.FirstSeenRound, entry.FirstSeenStepResultID,
+		entry.ReportedID, entry.Fingerprint, entry.Severity, entry.Action, entry.File, entry.Line, entry.Description,
+		entry.Category, entry.Check, entry.CheckID, entry.DecisionID, entry.Source, entry.UserInstructions,
+		entry.ReviewScope, entry.OriginalFindingJSON, entry.CurrentFindingJSON, entry.Status,
+		isBlockingInt, entry.SelectedInRound, entry.CorrectingCommitSHA, entry.FixSessionID, entry.ClosedInRound,
+		entry.ClosureEvidence, entry.ClosureReason, entry.DispositionProvenance,
+		entry.LastObservedRound, entry.LastObservedFile, entry.LastObservedLine,
+		entry.CreatedAt, entry.UpdatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("insert finding ledger entry: %w", err)
+	}
+	return nil
+}
+
+func insertLedgerEventTx(tx *sql.Tx, event *types.FindingLedgerEvent) error {
+	if event.ID == "" {
+		event.ID = "fe-" + newID()
+	}
+	if event.CreatedAt == 0 {
+		event.CreatedAt = now()
+	}
+	_, err := tx.Exec(
+		`INSERT INTO finding_ledger_events (
+			id, entry_id, run_id, step_name, round, step_result_id,
+			event_type, state_before, state_after, commit_sha, session_id,
+			evidence, reason, provenance, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		event.ID, event.EntryID, event.RunID, string(event.StepName), event.Round, event.StepResultID,
+		event.EventType, event.StateBefore, event.StateAfter, event.CommitSHA, event.SessionID,
+		event.Evidence, event.Reason, event.Provenance, event.CreatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("record finding ledger event: %w", err)
+	}
 	return nil
 }
