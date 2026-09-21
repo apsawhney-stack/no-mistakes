@@ -412,7 +412,7 @@ func TestExecutor_AutoFixInfoFindings(t *testing.T) {
 		fn: func(sctx *StepContext) (*StepOutcome, error) {
 			callCount++
 			if callCount == 1 {
-				// Info findings that are auto-fixable (not blocking, but fixable)
+				// Info findings can still be auto-fixable and enter the fix loop.
 				return &StepOutcome{
 					NeedsApproval: false,
 					AutoFixable:   true,

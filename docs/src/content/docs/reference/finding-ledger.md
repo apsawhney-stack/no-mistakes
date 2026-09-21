@@ -113,11 +113,11 @@ A rejected fix cannot keep vouching for itself: if a rereview reports the defect
 
 CI check findings are live measurements, not persistent claims about code, so the CI step owns their set: a fresh **settled** clean observation supersedes the check-anchored entries it no longer reports. That supersession is recorded as `closed_superseded` with the observed head and provenance `ci_settled_observation`, which keeps a red that simply stopped reproducing distinguishable from a proven repair. A non-clean or unresolved round supersedes nothing, and a review-bot comment is not a check observation — it stays open until a human decides.
 
-### Step-owned operator parks
+### Step-owned findings
 
-Some findings are synthesized by their own step from live state on every round rather than reported about the change: a Test budget cut, a failing configured `commands.test`, a protected-path refusal, a CI fix-agent budget cut. They are operator decisions, never repair targets, and their condition clears by resolving that live state rather than by repairing a defect.
+Some findings are synthesized by their own step from live state on every round rather than reported about the change: a Test budget cut, a failing configured `commands.test`, a protected-path refusal, a CI fix-agent budget cut, or the Test step's informational note that it wrote a new test file. The parked findings are operator decisions rather than repair targets, and the informational new-test-file note is a live-state report; each clears by resolving or re-measuring that live state rather than by repairing a reported defect.
 
-They keep their existing owner and are deliberately **not** admitted to the ledger. They are still carried on the round's payload, so the gate and the approval-refusal checks see them, but they are absent from every ledger count. Admitting them would create entries nothing could ever close, because no fix round selects them.
+They keep their existing owner and are deliberately **not** admitted to the ledger. They are still carried on the round's payload, so the gate, approval-refusal checks, and status readers see them, but they are absent from every ledger count. Admitting them would create entries nothing could ever close, because no fix round selects them.
 
 ## Terminal acceptance
 
@@ -127,9 +127,9 @@ A run is refused a clean completion for any unresolved ledger state that would o
 - any entry is `pending_verification` without closure evidence
 - any entry `needs_reconciliation`
 
-The executor also parks a step for the entries terminal acceptance refuses unconditionally: an entry in **pending verification** or **reconciliation required** reaches a gate for a decision instead of dead-ending the run at terminal acceptance.
+The executor also parks a step for the entries terminal acceptance would refuse: an entry in **pending verification**, **reconciliation required**, or **open and blocking** reaches a gate for a decision instead of dead-ending the run at terminal acceptance.
 
-A merely `open` entry keeps the semantics it had before the ledger existed. A blocking one parks its step through the ordinary blocking and ask-user finding checks, and an explicitly non-blocking informational no-op note does not park its step at all; it stays visible in the ledger until something disposes of it.
+A merely `open` entry keeps the semantics it had before the ledger existed. A blocking one parks its step through the ledger summary and the ordinary blocking or ask-user finding checks, while an explicitly non-blocking informational no-op note does not park its step at all; it stays visible in the ledger until something disposes of it.
 
 ## Legacy runs
 
