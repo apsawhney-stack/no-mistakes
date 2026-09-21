@@ -202,9 +202,10 @@ func (d *DB) StepFindingStats(step *StepResult) (StepStats, error) {
 	return stepFindingStats(step, rounds), nil
 }
 
-// findingItems returns the findings that count as mistakes. A Test budget cut
-// is an operator decision about the invocation budget, not a code mistake, so
-// it is neither reported nor, when a later round no longer carries it, fixed.
+// findingItems returns the findings that count as mistakes. Step-owned
+// findings are operator decisions or informational live state, not code
+// mistakes, so they are neither reported nor, when a later round no longer
+// carries them, fixed.
 func findingItems(raw *string) []types.Finding {
 	if raw == nil || *raw == "" {
 		return nil
@@ -213,9 +214,7 @@ func findingItems(raw *string) []types.Finding {
 	if err != nil {
 		return nil
 	}
-	return slices.DeleteFunc(findings.Items, func(item types.Finding) bool {
-		return item.ID == types.FindingIDTestAgentTimeout || item.ID == types.FindingIDTestAgentUnvalidatedWork
-	})
+	return slices.DeleteFunc(findings.Items, types.IsStepOwnedFinding)
 }
 
 func findingStatsKey(item types.Finding) types.Finding {

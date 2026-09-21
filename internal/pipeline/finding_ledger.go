@@ -724,7 +724,12 @@ func nextFreeID(prefix string, used map[string]bool) string {
 // first entry by its label while the operator meant the second by its display
 // ID. Both the payload builder and the selection resolver go through here.
 func assignDisplayIDs(stepName string, entries []*types.FindingLedgerEntry) map[string]string {
-	used := make(map[string]bool, len(entries))
+	used := make(map[string]bool, len(entries)*2)
+	for _, e := range entries {
+		if e.ID != "" {
+			used[e.ID] = true
+		}
+	}
 	assigned := make(map[string]string, len(entries))
 	for _, e := range entries {
 		candidate := e.ReportedID

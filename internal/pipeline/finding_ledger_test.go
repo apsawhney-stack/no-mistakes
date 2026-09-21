@@ -1150,6 +1150,67 @@ func TestFindingLedger_SelectionResolvesDisplayIDsNotRawLabels(t *testing.T) {
 	}
 }
 
+func TestFindingLedger_DisplayIDDoesNotCollideWithLedgerID(t *testing.T) {
+	database, runID, repoID := setupTestDB(t)
+	ctx := context.Background()
+	ledger := NewFindingLedger(database, runID, repoID)
+
+	sr, err := database.InsertStepResult(runID, types.StepReview)
+	if err != nil {
+		t.Fatalf("insert step result: %v", err)
+	}
+	if _, err := ledger.ProcessRoundFindings(ctx, types.StepReview, sr.ID, 1, &StepOutcome{
+		Findings:        mustMarshalFindings(types.Findings{Items: []types.Finding{{ID: "review-1", Severity: "error", Action: types.ActionAutoFix, File: "a.go", Line: 3, Description: "first defect"}}}),
+		ReviewablePaths: []string{"a.go", "b.go"},
+		ReviewedPaths:   []string{"a.go", "b.go"},
+	}, "head-1"); err != nil {
+		t.Fatalf("round 1: %v", err)
+	}
+	entries, err := database.GetFindingLedgerEntriesByStep(runID, types.StepReview)
+	if err != nil {
+		t.Fatalf("entries after round 1: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("entries after round 1 = %d, want 1", len(entries))
+	}
+	firstLedgerID := entries[0].ID
+	effective, err := ledger.ProcessRoundFindings(ctx, types.StepReview, sr.ID, 2, &StepOutcome{
+		Findings:        mustMarshalFindings(types.Findings{Items: []types.Finding{{ID: firstLedgerID, Severity: "error", Action: types.ActionAutoFix, File: "b.go", Line: 8, Description: "second defect"}}}),
+		ReviewablePaths: []string{"a.go", "b.go"},
+		ReviewedPaths:   []string{"a.go", "b.go"},
+	}, "head-1")
+	if err != nil {
+		t.Fatalf("round 2: %v", err)
+	}
+	parsed, err := types.ParseFindingsJSON(effective)
+	if err != nil {
+		t.Fatalf("parse effective: %v", err)
+	}
+	for _, item := range parsed.Items {
+		if item.File == "b.go" && item.ID == firstLedgerID {
+			t.Fatalf("second finding display ID collided with first ledger ID: %+v", item)
+		}
+	}
+
+	if err := ledger.ProcessSelection(ctx, types.StepReview, sr.ID, 2, []string{firstLedgerID}, "user"); err != nil {
+		t.Fatalf("selection: %v", err)
+	}
+	entries, err = database.GetFindingLedgerEntriesByStep(runID, types.StepReview)
+	if err != nil {
+		t.Fatalf("entries after selection: %v", err)
+	}
+	statusByFile := map[string]string{}
+	for _, e := range entries {
+		statusByFile[e.File] = e.Status
+	}
+	if statusByFile["a.go"] != types.FindingLedgerStatusPendingVerification {
+		t.Fatalf("a.go status = %q, want pending_verification", statusByFile["a.go"])
+	}
+	if statusByFile["b.go"] != types.FindingLedgerStatusOpen {
+		t.Fatalf("b.go status = %q, want open", statusByFile["b.go"])
+	}
+}
+
 func TestFindingLedger_SelectionIgnoresRawLabelRemintedElsewhere(t *testing.T) {
 	database, runID, repoID := setupTestDB(t)
 	ctx := context.Background()
