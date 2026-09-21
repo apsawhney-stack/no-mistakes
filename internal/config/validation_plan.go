@@ -104,10 +104,7 @@ func (r *ValidationPlanRaw) ToValidationPlan(cfg *Config) types.ValidationPlan {
 		writeSets["review_fix"] = []string{"**/*"}
 	}
 	if _, ok := writeSets["lint"]; !ok {
-		writeSets["lint"] = []string{"**/*"}
-	}
-	if _, ok := writeSets["lint_fix"]; !ok {
-		writeSets["lint_fix"] = []string{"**/*"}
+		writeSets["lint"] = []string{}
 	}
 	exclusions := defaultProtectedExclusions()
 	if len(r.ProtectedExclusions) > 0 {
@@ -159,11 +156,13 @@ func DefaultConservativeValidationPlan(cfg *Config) types.ValidationPlan {
 		"review_fix": {"**/*"},
 		"test":       {},
 		"document":   {"docs/**", "*.md", "README*"},
-		"lint":       {"**/*"},
-		"lint_fix":   {"**/*"},
+		"lint":       {},
 		"push":       {},
 		"pr":         {},
 		"ci":         {},
+	}
+	if cfg != nil && cfg.Commands.Lint != "" {
+		writeSets["lint_fix"] = defaultLintFixWriteSet()
 	}
 	exclusions := defaultProtectedExclusions()
 	if cfg != nil && len(cfg.ProtectedPaths) > 0 {
@@ -183,6 +182,37 @@ func DefaultConservativeValidationPlan(cfg *Config) types.ValidationPlan {
 	}
 	plan.PlanDigest = types.ComputePlanDigest(&plan)
 	return plan
+}
+
+func defaultLintFixWriteSet() []string {
+	return []string{
+		"*.go",
+		"**/*.go",
+		"*.js",
+		"**/*.js",
+		"*.ts",
+		"**/*.ts",
+		"*.tsx",
+		"**/*.tsx",
+		"*.jsx",
+		"**/*.jsx",
+		"*.py",
+		"**/*.py",
+		"*.rs",
+		"**/*.rs",
+		"*.java",
+		"**/*.java",
+		"*.c",
+		"**/*.c",
+		"*.cc",
+		"**/*.cc",
+		"*.cpp",
+		"**/*.cpp",
+		"*.h",
+		"**/*.h",
+		"*.hpp",
+		"**/*.hpp",
+	}
 }
 
 func defaultProtectedExclusions() []string {

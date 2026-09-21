@@ -582,6 +582,34 @@ func (m *WorkGenerationManager) AssertAcceptanceWithCIEvidence(ctx context.Conte
 
 	envelopeDigest := types.ComputeEnvelopeDigest(currentGen.GenerationDigest, finalHeadSHA, finalTreeSHA)
 
+	ledgerSummary, err := m.db.GetFindingLedgerSummary(m.runID)
+	if err != nil {
+		return nil, fmt.Errorf("load finding ledger summary: %w", err)
+	}
+	allResults, err := m.db.GetWorkPhaseResultsByRun(m.runID)
+	if err != nil {
+		return nil, fmt.Errorf("load invalidation history: %w", err)
+	}
+	var invalidationHistory []types.WorkInvalidationRecord
+	for _, r := range allResults {
+		if r.InvalidatedAt == nil && strings.TrimSpace(r.InvalidationReason) == "" {
+			continue
+		}
+		at := int64(0)
+		if r.InvalidatedAt != nil {
+			at = *r.InvalidatedAt
+		}
+		invalidationHistory = append(invalidationHistory, types.WorkInvalidationRecord{
+			Phase:      r.Phase,
+			ResultID:   r.ID,
+			FromStatus: types.PhaseResultStatusPassed,
+			ToStatus:   r.Status,
+			Reason:     r.InvalidationReason,
+			MutatedBy:  currentGen.Cause,
+			At:         at,
+		})
+	}
+
 	var summaries []types.WorkPhaseResultSummary
 	evidenceMap := make(map[string]string)
 	for _, r := range results {
@@ -613,6 +641,8 @@ func (m *WorkGenerationManager) AssertAcceptanceWithCIEvidence(ctx context.Conte
 		FinalEnvelopeDigest: envelopeDigest,
 		PhaseResults:        summaries,
 		EvidenceIdentities:  evidenceMap,
+		LedgerSummary:       ledgerSummary,
+		InvalidationHistory: invalidationHistory,
 		CIHeadSHA:           finalHeadSHA,
 		CICheckIdentity:     ciCheckIdentity,
 		CreatedAt:           time.Now().Unix(),

@@ -1134,7 +1134,11 @@ rounds:
 		sctx.ReviewStartingHeadSHA = reviewStartingHeadSHA
 		var preSnapshot *PhaseSnapshot
 		if e.workGenManager != nil {
-			preSnapshot, _ = e.workGenManager.CheckPhasePreState(ctx, stepName)
+			var snapErr error
+			preSnapshot, snapErr = e.workGenManager.CheckPhasePreState(ctx, stepName)
+			if snapErr != nil {
+				return false, "", fmt.Errorf("step %s check pre-state: %w", stepName, snapErr)
+			}
 		}
 		isProtectedPathRefusal := false
 		outcome, err := step.Execute(sctx)
