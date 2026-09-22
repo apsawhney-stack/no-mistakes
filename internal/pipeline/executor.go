@@ -400,18 +400,6 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 	return nil
 }
 
-func workGenerationProofInvalidating(manager *WorkGenerationManager, paths []string) bool {
-	if len(paths) == 0 {
-		return true
-	}
-	for _, p := range paths {
-		if isGenerationControlPath(p) || (manager != nil && manager.MatchesSelectedInputs(p)) {
-			return true
-		}
-	}
-	return false
-}
-
 func commitAllowedPhaseMutation(ctx context.Context, workDir string, stepName types.StepName, roundNum int, paths []string) (string, error) {
 	if len(paths) == 0 {
 		return "", nil
@@ -1285,11 +1273,9 @@ rounds:
 				return nil
 			}
 		}
-		isProtectedPathRefusal := false
 		outcome, err := step.Execute(sctx)
 		if refusal := ProtectedPathOutcome(err); refusal != nil {
 			outcome, err = refusal, nil
-			isProtectedPathRefusal = true
 		}
 		roundNum++
 		roundDuration := time.Since(phaseStart).Milliseconds()
@@ -1328,15 +1314,6 @@ rounds:
 				return false, "", fmt.Errorf("step %s check post-state: %w", stepName, vErr)
 			}
 			if !verdict.Allowed {
-				currentHead, _ := git.HeadSHA(ctx, workDir)
-				if currentHead == "" {
-					currentHead = run.HeadSHA
-				}
-				if isProtectedPathRefusal && workGenerationProofInvalidating(e.workGenManager, verdict.ModifiedPaths) {
-					if _, err := e.workGenManager.HandleMutation(ctx, fmt.Sprintf("%s_protected_refusal_round_%d", stepName, roundNum), stepName, currentHead, verdict.ModifiedPaths); err != nil {
-						return false, "", fmt.Errorf("step %s handle protected-path mutation: %w", stepName, err)
-					}
-				}
 				reason := verdict.Reason
 				if err := e.workGenManager.RestoreSnapshot(ctx, preSnapshot); err != nil {
 					reason = fmt.Sprintf("%s; automatic restore incomplete: %v", reason, err)
