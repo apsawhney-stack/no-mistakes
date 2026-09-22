@@ -401,14 +401,18 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 }
 
 func commitAllowedPhaseMutation(ctx context.Context, workDir string, stepName types.StepName, roundNum int, paths []string) (string, error) {
-	if len(paths) == 0 {
+	dirtyPaths, err := dirtyMutationPaths(ctx, workDir, paths)
+	if err != nil {
+		return "", err
+	}
+	if len(dirtyPaths) == 0 {
 		return "", nil
 	}
-	args := append([]string{"add", "-A", "--"}, paths...)
+	args := append([]string{"add", "-A", "--"}, dirtyPaths...)
 	if _, err := git.Run(ctx, workDir, args...); err != nil {
 		return "", err
 	}
-	staged, err := git.Run(ctx, workDir, append([]string{"diff", "--cached", "--name-only", "--"}, paths...)...)
+	staged, err := git.Run(ctx, workDir, append([]string{"diff", "--cached", "--name-only", "--"}, dirtyPaths...)...)
 	if err != nil {
 		return "", err
 	}
@@ -419,6 +423,26 @@ func commitAllowedPhaseMutation(ctx context.Context, workDir string, stepName ty
 		return "", err
 	}
 	return git.HeadSHA(ctx, workDir)
+}
+
+func dirtyMutationPaths(ctx context.Context, workDir string, paths []string) ([]string, error) {
+	var dirty []string
+	seen := make(map[string]bool, len(paths))
+	for _, p := range paths {
+		p = strings.TrimSpace(filepath.ToSlash(p))
+		if p == "" || seen[p] {
+			continue
+		}
+		seen[p] = true
+		out, err := git.Run(ctx, workDir, "status", "--porcelain", "--untracked-files=all", "--", p)
+		if err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(out) != "" {
+			dirty = append(dirty, p)
+		}
+	}
+	return dirty, nil
 }
 
 func (e *Executor) stepIndex(name types.StepName) (int, error) {
