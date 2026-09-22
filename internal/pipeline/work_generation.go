@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -170,7 +172,7 @@ func (m *WorkGenerationManager) EnsureGeneration(ctx context.Context, startingHe
 
 	depLockDigest := m.computeDependencyLockDigestLocked()
 	configDigest := m.computeConfigDigestLocked()
-	toolchainDigest := "go-default"
+	toolchainDigest := m.computeToolchainDigestLocked()
 
 	genDigest := types.ComputeGenerationDigest(
 		m.plan.PlanDigest,
@@ -527,7 +529,7 @@ func (m *WorkGenerationManager) HandleMutation(ctx context.Context, cause string
 
 	depLockDigest := m.computeDependencyLockDigestLocked()
 	configDigest := m.computeConfigDigestLocked()
-	toolchainDigest := "go-default"
+	toolchainDigest := m.computeToolchainDigestLocked()
 
 	newOrdinal := currentGen.Ordinal + 1
 	newDigest := types.ComputeGenerationDigest(
@@ -1053,6 +1055,23 @@ func (m *WorkGenerationManager) computeDependencyLockDigestLocked() string {
 	h := sha256.New()
 	for _, entry := range entries {
 		h.Write([]byte(entry))
+		h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func (m *WorkGenerationManager) computeToolchainDigestLocked() string {
+	parts := []string{"goos=" + runtime.GOOS, "goarch=" + runtime.GOARCH, "runtime=" + runtime.Version()}
+	if out, err := exec.Command("go", "version").Output(); err == nil {
+		parts = append(parts, "go_version="+strings.TrimSpace(string(out)))
+	}
+	if toolchain := strings.TrimSpace(os.Getenv("GOTOOLCHAIN")); toolchain != "" {
+		parts = append(parts, "gotoolchain="+toolchain)
+	}
+	sort.Strings(parts)
+	h := sha256.New()
+	for _, p := range parts {
+		h.Write([]byte(p))
 		h.Write([]byte{0})
 	}
 	return hex.EncodeToString(h.Sum(nil))
