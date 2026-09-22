@@ -127,6 +127,7 @@ type WorkPhaseResult struct {
 	EvidenceID           string   `json:"evidence_id,omitempty"`
 	OutputDigest         string   `json:"output_digest,omitempty"`
 	InvalidationReason   string   `json:"invalidation_reason,omitempty"`
+	InvalidatedBy        string   `json:"invalidated_by,omitempty"`
 	CreatedAt            int64    `json:"created_at"`
 	InvalidatedAt        *int64   `json:"invalidated_at,omitempty"`
 }

@@ -314,6 +314,7 @@ CREATE TABLE IF NOT EXISTS work_phase_results (
     evidence_id                TEXT NOT NULL DEFAULT '',
     output_digest              TEXT NOT NULL DEFAULT '',
     invalidation_reason        TEXT NOT NULL DEFAULT '',
+    invalidated_by             TEXT NOT NULL DEFAULT '',
     created_at                 INTEGER NOT NULL,
     invalidated_at             INTEGER
 );
@@ -611,6 +612,7 @@ var migrationStatements = []string{
 		invalidated_at             INTEGER
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_work_phase_results_run_gen ON work_phase_results (run_id, generation_id, phase)`,
+	`ALTER TABLE work_phase_results ADD COLUMN invalidated_by TEXT NOT NULL DEFAULT ''`,
 	`CREATE TABLE IF NOT EXISTS work_generation_poison (
 		run_id          TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
 		phase           TEXT NOT NULL,

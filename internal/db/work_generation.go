@@ -217,11 +217,11 @@ func (d *DB) InsertWorkPhaseResult(res *types.WorkPhaseResult) error {
 		`INSERT INTO work_phase_results (
 			id, run_id, generation_id, plan_id, phase, status, applicable,
 			command_identity, dependency_identities_json, evidence_id, output_digest,
-			invalidation_reason, created_at, invalidated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			invalidation_reason, invalidated_by, created_at, invalidated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		res.ID, res.RunID, res.GenerationID, res.PlanID, string(res.Phase), res.Status, applicableInt,
 		res.CommandIdentity, string(depBytes), res.EvidenceID, res.OutputDigest,
-		res.InvalidationReason, res.CreatedAt, res.InvalidatedAt,
+		res.InvalidationReason, res.InvalidatedBy, res.CreatedAt, res.InvalidatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("insert work phase result: %w", err)
@@ -231,7 +231,7 @@ func (d *DB) InsertWorkPhaseResult(res *types.WorkPhaseResult) error {
 
 const workPhaseResultSelectCols = `id, run_id, generation_id, plan_id, phase, status, applicable,
 	command_identity, dependency_identities_json, evidence_id, output_digest,
-	invalidation_reason, created_at, invalidated_at`
+	invalidation_reason, invalidated_by, created_at, invalidated_at`
 
 func scanWorkPhaseResult(scan func(...interface{}) error) (*types.WorkPhaseResult, error) {
 	res := &types.WorkPhaseResult{}
@@ -242,7 +242,7 @@ func scanWorkPhaseResult(scan func(...interface{}) error) (*types.WorkPhaseResul
 	if err := scan(
 		&res.ID, &res.RunID, &res.GenerationID, &res.PlanID, &phase, &res.Status, &applicableInt,
 		&res.CommandIdentity, &depJSON, &res.EvidenceID, &res.OutputDigest,
-		&res.InvalidationReason, &res.CreatedAt, &res.InvalidatedAt,
+		&res.InvalidationReason, &res.InvalidatedBy, &res.CreatedAt, &res.InvalidatedAt,
 	); err != nil {
 		return nil, err
 	}
@@ -305,16 +305,16 @@ func (d *DB) GetWorkPhaseResultsByRun(runID string) ([]*types.WorkPhaseResult, e
 }
 
 // InvalidateWorkPhaseResults marks matching phase results as stale/invalidated.
-func (d *DB) InvalidateWorkPhaseResults(runID, genID string, phases []types.StepName, reason string) error {
+func (d *DB) InvalidateWorkPhaseResults(runID, genID string, phases []types.StepName, reason, invalidatedBy string) error {
 	if len(phases) == 0 {
 		return nil
 	}
 	ts := now()
 	for _, p := range phases {
 		_, err := d.sql.Exec(
-			`UPDATE work_phase_results SET applicable = 0, status = ?, invalidation_reason = ?, invalidated_at = ?
+			`UPDATE work_phase_results SET applicable = 0, status = ?, invalidation_reason = ?, invalidated_by = ?, invalidated_at = ?
 			 WHERE run_id = ? AND generation_id = ? AND phase = ? AND applicable = 1`,
-			types.PhaseResultStatusStale, reason, ts, runID, genID, string(p),
+			types.PhaseResultStatusStale, reason, invalidatedBy, ts, runID, genID, string(p),
 		)
 		if err != nil {
 			return fmt.Errorf("invalidate phase result %s: %w", p, err)
@@ -324,12 +324,12 @@ func (d *DB) InvalidateWorkPhaseResults(runID, genID string, phases []types.Step
 }
 
 // InvalidateAllActivePhaseResults marks all currently applicable phase results for a run as stale.
-func (d *DB) InvalidateAllActivePhaseResults(runID string, reason string) error {
+func (d *DB) InvalidateAllActivePhaseResults(runID string, reason, invalidatedBy string) error {
 	ts := now()
 	_, err := d.sql.Exec(
-		`UPDATE work_phase_results SET applicable = 0, status = ?, invalidation_reason = ?, invalidated_at = ?
+		`UPDATE work_phase_results SET applicable = 0, status = ?, invalidation_reason = ?, invalidated_by = ?, invalidated_at = ?
 		 WHERE run_id = ? AND applicable = 1`,
-		types.PhaseResultStatusStale, reason, ts, runID,
+		types.PhaseResultStatusStale, reason, invalidatedBy, ts, runID,
 	)
 	if err != nil {
 		return fmt.Errorf("invalidate active phase results for run %s: %w", runID, err)

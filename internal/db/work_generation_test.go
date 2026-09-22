@@ -148,7 +148,7 @@ func TestWorkPhaseResult_InsertAndInvalidate(t *testing.T) {
 	}
 
 	// Invalidate Test result
-	if err := database.InvalidateWorkPhaseResults(run.ID, gen.ID, []types.StepName{types.StepTest}, "source mutated"); err != nil {
+	if err := database.InvalidateWorkPhaseResults(run.ID, gen.ID, []types.StepName{types.StepTest}, "source mutated", "test_mutation"); err != nil {
 		t.Fatalf("InvalidateWorkPhaseResults: %v", err)
 	}
 

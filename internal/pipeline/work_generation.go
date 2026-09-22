@@ -419,7 +419,7 @@ func (m *WorkGenerationManager) HandleMutation(ctx context.Context, cause string
 	}
 
 	// Invalidate dependent phase results for generation N
-	if err := m.db.InvalidateAllActivePhaseResults(m.runID, fmt.Sprintf("invalidated by %s (generation %d -> %d)", cause, currentGen.Ordinal, currentGen.Ordinal+1)); err != nil {
+	if err := m.db.InvalidateAllActivePhaseResults(m.runID, fmt.Sprintf("invalidated by %s (generation %d -> %d)", cause, currentGen.Ordinal, currentGen.Ordinal+1), cause); err != nil {
 		return nil, fmt.Errorf("invalidate dependent phase results: %w", err)
 	}
 
@@ -654,7 +654,7 @@ func (m *WorkGenerationManager) AssertAcceptanceWithCIEvidence(ctx context.Conte
 			FromStatus: types.PhaseResultStatusPassed,
 			ToStatus:   r.Status,
 			Reason:     r.InvalidationReason,
-			MutatedBy:  currentGen.Cause,
+			MutatedBy:  r.InvalidatedBy,
 			At:         at,
 		})
 	}
@@ -952,7 +952,6 @@ func isNarrativePath(file string) bool {
 	base := path.Base(clean)
 	if strings.HasPrefix(clean, "docs/") ||
 		strings.HasSuffix(clean, ".md") ||
-		strings.HasSuffix(clean, ".txt") ||
 		strings.HasPrefix(base, "README") ||
 		strings.HasPrefix(base, "LICENSE") ||
 		strings.HasPrefix(base, "CONTRIBUTING") ||
