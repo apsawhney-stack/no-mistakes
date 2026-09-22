@@ -69,9 +69,10 @@ type Executor struct {
 	waitingStep            types.StepName        // which step is currently awaiting approval
 	waitingApprovalRefusal string                // non-empty: why Approve is rejected at the waiting gate
 
-	gateReconcileInterval time.Duration
-	gateReconcileTimeout  time.Duration
-	onPRMerged            func(context.Context, string)
+	gateReconcileInterval    time.Duration
+	gateReconcileTimeout     time.Duration
+	onPRMerged               func(context.Context, string)
+	workAttestationPublisher func(context.Context, *db.Run, *db.Repo, *types.WorkAttestation) error
 }
 
 // SetOnPRMerged registers a best-effort hook invoked after a merged PR state
@@ -81,6 +82,32 @@ func (e *Executor) SetOnPRMerged(fn func(context.Context, string)) {
 		return
 	}
 	e.onPRMerged = fn
+}
+
+func (e *Executor) SetWorkAttestationPublisher(fn func(context.Context, *db.Run, *db.Repo, *types.WorkAttestation) error) {
+	if e == nil {
+		return
+	}
+	e.workAttestationPublisher = fn
+	if e.workGenManager != nil {
+		e.workGenManager.RegisterAttestationPublisher(func(ctx context.Context, att *types.WorkAttestation) error {
+			run, err := e.db.GetRun(att.RunID)
+			if err != nil {
+				return fmt.Errorf("load run for work attestation publication: %w", err)
+			}
+			if run == nil {
+				return fmt.Errorf("load run for work attestation publication: run %s not found", att.RunID)
+			}
+			repo, err := e.db.GetRepo(run.RepoID)
+			if err != nil {
+				return fmt.Errorf("load repo for work attestation publication: %w", err)
+			}
+			if repo == nil {
+				return fmt.Errorf("load repo for work attestation publication: repo %s not found", run.RepoID)
+			}
+			return fn(ctx, run, repo, att)
+		})
+	}
 }
 
 // SetForgeContext configures the immutable provider context used by every
@@ -360,6 +387,9 @@ func (e *Executor) initializeRunScopes(runID string, repoIDs ...string) error {
 		e.workGenManager, err = NewWorkGenerationManager(e.db, runID, repoID, e.workDir, e.config, e.stepNames()...)
 		if err != nil {
 			return err
+		}
+		if e.workAttestationPublisher != nil {
+			e.SetWorkAttestationPublisher(e.workAttestationPublisher)
 		}
 	}
 	return nil

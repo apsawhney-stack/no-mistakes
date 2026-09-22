@@ -379,6 +379,31 @@ func samePath(a, b string) bool {
 	return a == b
 }
 
+func (m *RunManager) setWorkAttestationPublisher(executor *pipeline.Executor, cfg *config.Config, forge *forgecontext.Context) {
+	if executor == nil {
+		return
+	}
+	executor.SetWorkAttestationPublisher(func(ctx context.Context, run *db.Run, repo *db.Repo, att *types.WorkAttestation) error {
+		if run == nil || repo == nil || att == nil {
+			return nil
+		}
+		workDir := ""
+		if run.WorktreeDir != nil {
+			workDir = *run.WorktreeDir
+		}
+		sctx := &pipeline.StepContext{
+			Ctx:          ctx,
+			Run:          run,
+			Repo:         repo,
+			WorkDir:      workDir,
+			Config:       cfg,
+			ForgeContext: forge,
+			DB:           m.db,
+		}
+		return steps.PublishFinalWorkAttestationToPR(ctx, sctx, att)
+	})
+}
+
 func (m *RunManager) resumeRecoveredRuns(plans []recoveredRunPlan) {
 	for _, plan := range plans {
 		m.resumeRecoveredRun(plan)
@@ -392,6 +417,7 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 	}
 	runCtx, cancel := context.WithCancelCause(context.Background())
 	executor := pipeline.NewExecutor(m.db, m.paths, plan.cfg, plan.agent, plan.steps, m.broadcast)
+	m.setWorkAttestationPublisher(executor, plan.cfg, plan.forge)
 	executor.SetOnPRMerged(func(_ context.Context, runID string) {
 		m.wg.Add(1)
 		go func() {
@@ -1563,6 +1589,7 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	executor := pipeline.NewExecutor(m.db, m.paths, cfg, ag, execSteps, m.broadcast)
 	executor.SetForgeContext(forgeCtx)
 	executor.SetSkippedSteps(skipSteps)
+	m.setWorkAttestationPublisher(executor, cfg, forgeCtx)
 	executor.SetOnPRMerged(func(_ context.Context, runID string) {
 		m.wg.Add(1)
 		go func() {

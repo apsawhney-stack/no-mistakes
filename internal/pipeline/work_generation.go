@@ -225,12 +225,25 @@ func (m *WorkGenerationManager) RestoreSnapshot(ctx context.Context, pre *PhaseS
 	} else if _, err := git.Run(ctx, m.workDir, "reset", "--hard"); err != nil {
 		return fmt.Errorf("reset worktree: %w", err)
 	}
-	if _, err := git.Run(ctx, m.workDir, "clean", "-fdx"); err != nil {
-		return fmt.Errorf("clean unauthorized worktree writes: %w", err)
-	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	restored, err := m.scanWorkTreeHashesLocked()
+	if err != nil {
+		return fmt.Errorf("scan restored worktree snapshot: %w", err)
+	}
+	var added []string
+	for p := range restored {
+		if _, ok := pre.FileHashes[p]; !ok {
+			added = append(added, p)
+		}
+	}
+	sort.Slice(added, func(i, j int) bool { return len(added[i]) > len(added[j]) })
+	for _, p := range added {
+		if err := os.Remove(filepath.Join(m.workDir, filepath.FromSlash(p))); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove unauthorized write %s: %w", p, err)
+		}
+	}
+	restored, err = m.scanWorkTreeHashesLocked()
 	if err != nil {
 		return fmt.Errorf("verify restored worktree snapshot: %w", err)
 	}
