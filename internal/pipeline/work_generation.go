@@ -231,6 +231,17 @@ func (m *WorkGenerationManager) CheckPhasePreState(ctx context.Context, phase ty
 		return nil, fmt.Errorf("worktree has unresolved unauthorized-write poison from phase %s: %s", m.poison.phase, m.poison.reason)
 	}
 	if m.db != nil && m.runID != "" {
+		currentGen, err := m.db.GetCurrentWorkGeneration(m.runID)
+		if err != nil {
+			return nil, fmt.Errorf("load current work generation: %w", err)
+		}
+		if currentGen != nil && m.workDir != "" {
+			if head, err := git.HeadSHA(ctx, m.workDir); err == nil && head != "" {
+				if err := m.verifyHeadEnvelopeLocked(ctx, currentGen, head); err != nil {
+					return nil, err
+				}
+			}
+		}
 		phase, reason, preHashes, err := m.db.GetWorkGenerationPoison(m.runID)
 		if err != nil {
 			return nil, err
@@ -635,6 +646,34 @@ func (m *WorkGenerationManager) RecordPhaseResult(
 // 2. Confirms no unauthorized writes are outstanding.
 // 3. Verifies that CI checked the exact final head.
 // 4. Publishes and returns the final WorkAttestation.
+func (m *WorkGenerationManager) verifyHeadEnvelopeLocked(ctx context.Context, gen *types.WorkGeneration, headSHA string) error {
+	if gen == nil || strings.TrimSpace(headSHA) == "" || strings.TrimSpace(gen.GitHeadSHA) == "" || headSHA == gen.GitHeadSHA {
+		return nil
+	}
+	if strings.TrimSpace(m.workDir) == "" {
+		return fmt.Errorf("work generation head drift cannot be verified without a worktree")
+	}
+	paths, err := git.DiffNameOnly(ctx, m.workDir, gen.GitHeadSHA, headSHA)
+	if err != nil {
+		return fmt.Errorf("verify work generation envelope diff: %w", err)
+	}
+	var nonNarrative []string
+	for _, p := range paths {
+		clean := filepath.ToSlash(strings.TrimSpace(p))
+		if clean == "" {
+			continue
+		}
+		if m.matchesSelectedInputs(clean) || isGenerationControlPath(clean) || !isNarrativePath(clean) {
+			nonNarrative = append(nonNarrative, clean)
+		}
+	}
+	if len(nonNarrative) > 0 {
+		sort.Strings(nonNarrative)
+		return fmt.Errorf("work generation head drift changes non-narrative inputs: %s", strings.Join(nonNarrative, ", "))
+	}
+	return nil
+}
+
 func (m *WorkGenerationManager) AssertAcceptance(ctx context.Context, finalHeadSHA string, ciChecksGreen bool) (*types.WorkAttestation, error) {
 	ciIdentity := ""
 	if ciChecksGreen {
@@ -710,6 +749,9 @@ func (m *WorkGenerationManager) AssertAcceptanceWithCIEvidence(ctx context.Conte
 	}
 	if finalTreeSHA == "" {
 		finalTreeSHA = currentGen.GitTreeSHA
+	}
+	if err := m.verifyHeadEnvelopeLocked(ctx, currentGen, finalHeadSHA); err != nil {
+		return nil, err
 	}
 
 	ciCheckIdentity = strings.TrimSpace(ciCheckIdentity)
