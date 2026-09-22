@@ -688,11 +688,8 @@ func (m *WorkGenerationManager) AssertAcceptanceWithCIEvidence(ctx context.Conte
 			stale = append(stale, string(req))
 			continue
 		}
-		if res.Status != types.PhaseResultStatusPassed && res.Status != types.PhaseResultStatusNotApplicable {
+		if res.Status != types.PhaseResultStatusPassed {
 			return nil, fmt.Errorf("terminal acceptance refused: phase %s status is %q (requires passed)", req, res.Status)
-		}
-		if res.Status == types.PhaseResultStatusNotApplicable && m.plan.Reason == "" {
-			return nil, fmt.Errorf("terminal acceptance refused: phase %s marked not_applicable without explicit trusted-plan reason", req)
 		}
 	}
 

@@ -1727,9 +1727,14 @@ done:
 	if e.workGenManager != nil {
 		switch status {
 		case types.StepStatusCompleted:
-			evidenceID, outputDigest, evidenceErr := publicEvidenceIdentity(run.ID, stepName, sctx.EvidenceDir)
-			if evidenceErr != nil {
-				return false, "", fmt.Errorf("record step %s evidence identity: %w", stepName, evidenceErr)
+			evidenceID := ""
+			outputDigest := ""
+			if stepName == types.StepTest {
+				var evidenceErr error
+				evidenceID, outputDigest, evidenceErr = publicEvidenceIdentity(run.ID, stepName, sctx.EvidenceDir)
+				if evidenceErr != nil {
+					return false, "", fmt.Errorf("record step %s evidence identity: %w", stepName, evidenceErr)
+				}
 			}
 			_, _ = e.workGenManager.RecordPhaseResult(ctx, stepName, types.PhaseResultStatusPassed, string(stepName), evidenceID, outputDigest, nil)
 			if stepName == types.StepReview {
