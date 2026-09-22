@@ -65,6 +65,7 @@ type ValidationPlan struct {
 	SelectedInputs      []string            `json:"selected_inputs" yaml:"selected_inputs"`
 	RequiredPhases      []StepName          `json:"required_phases" yaml:"required_phases"`
 	Commands            map[string]string   `json:"commands,omitempty" yaml:"commands,omitempty"`
+	ToolchainProbes     map[string][]string `json:"toolchain_probes,omitempty" yaml:"toolchain_probes,omitempty"`
 	DependencyEdges     map[string][]string `json:"dependency_edges,omitempty" yaml:"dependency_edges,omitempty"`
 	PhaseWriteSets      map[string][]string `json:"phase_write_sets,omitempty" yaml:"phase_write_sets,omitempty"`
 	ProtectedExclusions []string            `json:"protected_exclusions,omitempty" yaml:"protected_exclusions,omitempty"`

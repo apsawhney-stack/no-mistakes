@@ -698,6 +698,9 @@ func (m *WorkGenerationManager) AssertAcceptanceWithCIEvidence(ctx context.Conte
 	if currentGen == nil {
 		return nil, fmt.Errorf("terminal acceptance refused: no active work generation exists for run %s", m.runID)
 	}
+	if strings.HasPrefix(currentGen.ToolchainDigest, "missing:") || strings.HasPrefix(currentGen.ToolchainDigest, "failed:") {
+		return nil, fmt.Errorf("terminal acceptance refused: missing toolchain identity evidence: %s", currentGen.ToolchainDigest)
+	}
 	if _, reason, _, err := m.db.GetWorkGenerationPoison(m.runID); err != nil {
 		return nil, err
 	} else if reason != "" {
@@ -1101,11 +1104,24 @@ func (m *WorkGenerationManager) computeDependencyLockDigestLocked() string {
 
 func (m *WorkGenerationManager) computeToolchainDigestLocked() string {
 	parts := []string{"goos=" + runtime.GOOS, "goarch=" + runtime.GOARCH, "runtime=" + runtime.Version()}
-	if out, err := exec.Command("go", "version").Output(); err == nil {
-		parts = append(parts, "go_version="+strings.TrimSpace(string(out)))
-	}
 	if toolchain := strings.TrimSpace(os.Getenv("GOTOOLCHAIN")); toolchain != "" {
 		parts = append(parts, "gotoolchain="+toolchain)
+	}
+	for phase, cmd := range m.plan.Commands {
+		argv := append([]string(nil), m.plan.ToolchainProbes[phase]...)
+		if len(argv) == 0 {
+			argv = defaultToolchainProbe(cmd)
+		}
+		if len(argv) == 0 {
+			return "missing:" + phase
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		out, err := exec.CommandContext(ctx, argv[0], argv[1:]...).CombinedOutput()
+		cancel()
+		if err != nil {
+			return "failed:" + phase + ":" + strings.Join(argv, " ")
+		}
+		parts = append(parts, phase+"="+strings.Join(argv, " ")+"\x00"+strings.TrimSpace(string(out)))
 	}
 	sort.Strings(parts)
 	h := sha256.New()
@@ -1114,6 +1130,22 @@ func (m *WorkGenerationManager) computeToolchainDigestLocked() string {
 		h.Write([]byte{0})
 	}
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+func defaultToolchainProbe(command string) []string {
+	fields := strings.Fields(command)
+	if len(fields) == 0 {
+		return nil
+	}
+	exe := fields[0]
+	switch filepath.Base(exe) {
+	case "go":
+		return []string{exe, "version"}
+	case "python", "python3", "node", "npm", "yarn", "cargo", "rustc":
+		return []string{exe, "--version"}
+	default:
+		return []string{exe, "--version"}
+	}
 }
 
 func (m *WorkGenerationManager) computeConfigDigestLocked() string {

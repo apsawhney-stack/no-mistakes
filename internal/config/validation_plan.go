@@ -20,6 +20,12 @@ func cloneValidationPlan(raw *ValidationPlanRaw) *ValidationPlanRaw {
 			clone.Commands[k] = v
 		}
 	}
+	if raw.ToolchainProbes != nil {
+		clone.ToolchainProbes = make(map[string][]string)
+		for k, v := range raw.ToolchainProbes {
+			clone.ToolchainProbes[k] = append([]string(nil), v...)
+		}
+	}
 	if raw.DependencyEdges != nil {
 		clone.DependencyEdges = make(map[string][]string)
 		for k, v := range raw.DependencyEdges {
@@ -76,6 +82,13 @@ func (r *ValidationPlanRaw) ToValidationPlan(cfg *Config) types.ValidationPlan {
 		v = strings.TrimSpace(v)
 		if k != "" && v != "" {
 			cmds[k] = v
+		}
+	}
+	toolchains := make(map[string][]string)
+	for k, v := range r.ToolchainProbes {
+		k = strings.TrimSpace(k)
+		if k != "" && len(v) > 0 {
+			toolchains[k] = append([]string(nil), v...)
 		}
 	}
 	if cfg != nil {
@@ -135,6 +148,7 @@ func (r *ValidationPlanRaw) ToValidationPlan(cfg *Config) types.ValidationPlan {
 		SelectedInputs:      selected,
 		RequiredPhases:      phases,
 		Commands:            cmds,
+		ToolchainProbes:     toolchains,
 		DependencyEdges:     edges,
 		PhaseWriteSets:      writeSets,
 		ProtectedExclusions: exclusions,

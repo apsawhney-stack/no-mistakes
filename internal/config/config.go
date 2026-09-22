@@ -358,6 +358,7 @@ type ValidationPlanRaw struct {
 	SelectedInputs      []string            `yaml:"selected_inputs"`
 	RequiredPhases      []string            `yaml:"required_phases"`
 	Commands            map[string]string   `yaml:"commands"`
+	ToolchainProbes     map[string][]string `yaml:"toolchain_probes"`
 	DependencyEdges     map[string][]string `yaml:"dependency_edges"`
 	PhaseWriteSets      map[string][]string `yaml:"phase_write_sets"`
 	ProtectedExclusions []string            `yaml:"protected_exclusions"`
