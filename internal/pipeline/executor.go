@@ -1317,10 +1317,8 @@ rounds:
 					}
 				}
 				reason := verdict.Reason
-				if !isProtectedPathRefusal {
-					if err := e.workGenManager.RestoreSnapshot(ctx, preSnapshot); err != nil {
-						reason = fmt.Sprintf("%s; automatic restore incomplete: %v", reason, err)
-					}
+				if err := e.workGenManager.RestoreSnapshot(ctx, preSnapshot); err != nil {
+					reason = fmt.Sprintf("%s; automatic restore incomplete: %v", reason, err)
 				}
 				unauthOutcome := UnauthorizedWriteOutcome(stepName, verdict.UnauthorizedPaths, reason)
 				outcome.NeedsApproval = true
@@ -1736,6 +1734,11 @@ done:
 					return false, "", fmt.Errorf("record step %s evidence identity: %w", stepName, evidenceErr)
 				}
 			}
+			if stepName == types.StepCI {
+				if head, err := git.HeadSHA(ctx, workDir); err == nil {
+					outputDigest = strings.TrimSpace(head)
+				}
+			}
 			_, _ = e.workGenManager.RecordPhaseResult(ctx, stepName, types.PhaseResultStatusPassed, string(stepName), evidenceID, outputDigest, nil)
 			if stepName == types.StepReview {
 				_ = e.workGenManager.SealGeneration(ctx, stepName)
@@ -2100,7 +2103,7 @@ func (e *Executor) completeRun(run *db.Run, repo *db.Repo) error {
 		headSHA = verifiedHead
 	}
 	if e.workGenManager != nil {
-		ciIdentity, err := e.workAttestationCIIdentity(run.ID)
+		ciIdentity, err := e.workAttestationCIIdentity(run.ID, headSHA)
 		if err != nil {
 			return err
 		}
@@ -2125,7 +2128,7 @@ func (e *Executor) completeRun(run *db.Run, repo *db.Repo) error {
 	return nil
 }
 
-func (e *Executor) workAttestationCIIdentity(runID string) (string, error) {
+func (e *Executor) workAttestationCIIdentity(runID, finalHeadSHA string) (string, error) {
 	ciRequired := false
 	if e.workGenManager != nil {
 		for _, phase := range e.workGenManager.Plan().RequiredPhases {
@@ -2152,21 +2155,49 @@ func (e *Executor) workAttestationCIIdentity(runID string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("load CI step evidence: %w", err)
 	}
+	ciStepCompleted := false
+	ciOverride := false
 	for _, step := range steps {
 		if step.StepName != types.StepCI {
 			continue
 		}
-		if step.OverrideReason != nil && strings.TrimSpace(*step.OverrideReason) != "" {
-			return "ci_approval_override", nil
-		}
-		if step.Status == types.StepStatusCompleted {
-			return "ci_checks_green", nil
-		}
+		ciOverride = step.OverrideReason != nil && strings.TrimSpace(*step.OverrideReason) != ""
+		ciStepCompleted = step.Status == types.StepStatusCompleted
 		if step.Status == types.StepStatusSkipped && run != nil && run.CIReadyNoCI {
 			return "declared_no_ci", nil
 		}
+		break
 	}
-	return "", fmt.Errorf("terminal acceptance refused: no CI evidence recorded for work attestation")
+	if !ciStepCompleted && !ciOverride {
+		return "", fmt.Errorf("terminal acceptance refused: no CI evidence recorded for work attestation")
+	}
+	if e.workGenManager == nil {
+		return "", fmt.Errorf("terminal acceptance refused: missing work generation manager for CI evidence")
+	}
+	gen, err := e.workGenManager.CurrentGeneration(context.Background())
+	if err != nil {
+		return "", fmt.Errorf("load CI evidence generation: %w", err)
+	}
+	if gen == nil {
+		return "", fmt.Errorf("terminal acceptance refused: no active generation for CI evidence")
+	}
+	results, err := e.db.GetWorkPhaseResultsByGeneration(runID, gen.ID)
+	if err != nil {
+		return "", fmt.Errorf("load generation CI phase result: %w", err)
+	}
+	for _, res := range results {
+		if res.Phase != types.StepCI || res.Status != types.PhaseResultStatusPassed || !res.Applicable {
+			continue
+		}
+		if strings.TrimSpace(res.OutputDigest) != strings.TrimSpace(finalHeadSHA) {
+			return "", fmt.Errorf("terminal acceptance refused: CI evidence head %s does not match final head %s", strings.TrimSpace(res.OutputDigest), strings.TrimSpace(finalHeadSHA))
+		}
+		if ciOverride {
+			return "ci_approval_override", nil
+		}
+		return "ci_checks_green", nil
+	}
+	return "", fmt.Errorf("terminal acceptance refused: no generation-bound CI evidence recorded for final head")
 }
 
 func (e *Executor) reconcileTerminalRunHead(run *db.Run) (string, bool) {
