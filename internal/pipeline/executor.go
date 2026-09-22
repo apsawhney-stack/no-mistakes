@@ -412,6 +412,27 @@ func workGenerationProofInvalidating(manager *WorkGenerationManager, paths []str
 	return false
 }
 
+func commitAllowedPhaseMutation(ctx context.Context, workDir string, stepName types.StepName, roundNum int, paths []string) (string, error) {
+	if len(paths) == 0 {
+		return "", nil
+	}
+	args := append([]string{"add", "-A", "--"}, paths...)
+	if _, err := git.Run(ctx, workDir, args...); err != nil {
+		return "", err
+	}
+	staged, err := git.Run(ctx, workDir, append([]string{"diff", "--cached", "--name-only", "--"}, paths...)...)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(staged) == "" {
+		return "", nil
+	}
+	if _, err := git.Run(ctx, workDir, "commit", "-m", fmt.Sprintf("no-mistakes: record %s mutation round %d", stepName, roundNum)); err != nil {
+		return "", err
+	}
+	return git.HeadSHA(ctx, workDir)
+}
+
 func (e *Executor) stepIndex(name types.StepName) (int, error) {
 	for index, step := range e.steps {
 		if step.Name() == name {
@@ -1327,6 +1348,15 @@ rounds:
 				currentHead, _ := git.HeadSHA(ctx, workDir)
 				if currentHead == "" {
 					currentHead = run.HeadSHA
+				}
+				if len(verdict.ModifiedPaths) > 0 {
+					committedHead, err := commitAllowedPhaseMutation(ctx, workDir, stepName, roundNum, verdict.ModifiedPaths)
+					if err != nil {
+						return false, "", fmt.Errorf("step %s commit allowed mutation: %w", stepName, err)
+					}
+					if committedHead != "" {
+						currentHead = committedHead
+					}
 				}
 				if stepName == types.StepRebase {
 					mutated := verdict.ModifiedPaths
