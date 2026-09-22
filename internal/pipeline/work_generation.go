@@ -27,6 +27,11 @@ type PhaseSnapshot struct {
 	FileHashes map[string]string // relPath -> type/mode/content identity
 }
 
+type poisonEvidence struct {
+	phase  types.StepName
+	reason string
+}
+
 type attestationPublishFunc func(context.Context, *types.WorkAttestation) error
 
 // WriteSetVerdict records the outcome of phase write-set verification.
@@ -49,6 +54,7 @@ type WorkGenerationManager struct {
 	plan                  types.ValidationPlan
 	envelope              *types.FinalEnvelope
 	attestationPublishers []attestationPublishFunc
+	poison                *poisonEvidence
 	mu                    sync.Mutex
 }
 
@@ -194,6 +200,9 @@ func (m *WorkGenerationManager) EnsureGeneration(ctx context.Context, startingHe
 func (m *WorkGenerationManager) CheckPhasePreState(ctx context.Context, phase types.StepName) (*PhaseSnapshot, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.poison != nil {
+		return nil, fmt.Errorf("worktree has unresolved unauthorized-write poison from phase %s: %s", m.poison.phase, m.poison.reason)
+	}
 
 	headSHA := ""
 	if m.workDir != "" {
@@ -249,7 +258,9 @@ func (m *WorkGenerationManager) RestoreSnapshot(ctx context.Context, pre *PhaseS
 		return fmt.Errorf("verify restored worktree snapshot: %w", err)
 	}
 	if !sameSnapshotHashes(pre.FileHashes, restored) {
-		return fmt.Errorf("restore phase snapshot: restored worktree does not match pre-phase snapshot")
+		reason := "restored worktree does not match pre-phase snapshot"
+		m.poison = &poisonEvidence{phase: pre.Phase, reason: reason}
+		return fmt.Errorf("restore phase snapshot: %s", reason)
 	}
 	return nil
 }
@@ -656,7 +667,16 @@ func (m *WorkGenerationManager) AssertAcceptanceWithCIEvidence(ctx context.Conte
 	}
 	att.AttestationDigest = types.ComputeAttestationDigest(att)
 
-	if err := m.db.InsertWorkAttestation(att); err != nil {
+	existingAtt, err := m.db.GetWorkAttestation(m.runID)
+	if err != nil {
+		return nil, fmt.Errorf("load existing final attestation: %w", err)
+	}
+	if existingAtt != nil {
+		if existingAtt.AttestationDigest != att.AttestationDigest || existingAtt.GenerationDigest != att.GenerationDigest || existingAtt.FinalHeadSHA != att.FinalHeadSHA {
+			return nil, fmt.Errorf("persist final attestation: existing attestation %s does not match current acceptance", existingAtt.ID)
+		}
+		att = existingAtt
+	} else if err := m.db.InsertWorkAttestation(att); err != nil {
 		return nil, fmt.Errorf("persist final attestation: %w", err)
 	}
 

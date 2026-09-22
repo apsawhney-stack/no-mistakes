@@ -109,6 +109,15 @@ func (r *ValidationPlanRaw) ToValidationPlan(cfg *Config) types.ValidationPlan {
 	if _, ok := writeSets["lint"]; !ok {
 		writeSets["lint"] = []string{}
 	}
+	if _, ok := writeSets["test_fix"]; !ok {
+		writeSets["test_fix"] = defaultLintFixWriteSet()
+	}
+	if _, ok := writeSets["document_fix"]; !ok {
+		writeSets["document_fix"] = []string{"docs/**", "*.md", "README*"}
+	}
+	if _, ok := writeSets["ci_fix"]; !ok {
+		writeSets["ci_fix"] = defaultLintFixWriteSet()
+	}
 	exclusions := defaultProtectedExclusions()
 	if len(r.ProtectedExclusions) > 0 {
 		exclusions = append(exclusions, r.ProtectedExclusions...)
@@ -155,15 +164,18 @@ func DefaultConservativeValidationPlan(cfg *Config) types.ValidationPlan {
 		}
 	}
 	writeSets := map[string][]string{
-		"rebase":     {"**/*"},
-		"review":     {},
-		"review_fix": {"**/*"},
-		"test":       {},
-		"document":   {"docs/**", "*.md", "README*"},
-		"lint":       {},
-		"push":       {},
-		"pr":         {},
-		"ci":         {},
+		"rebase":       {"**/*"},
+		"review":       {},
+		"review_fix":   {"**/*"},
+		"test":         {},
+		"test_fix":     defaultLintFixWriteSet(),
+		"document":     {"docs/**", "*.md", "README*"},
+		"document_fix": {"docs/**", "*.md", "README*"},
+		"lint":         {},
+		"push":         {},
+		"pr":           {},
+		"ci":           {},
+		"ci_fix":       defaultLintFixWriteSet(),
 	}
 	if cfg != nil && cfg.Commands.Lint != "" {
 		writeSets["lint_fix"] = defaultLintFixWriteSet()
