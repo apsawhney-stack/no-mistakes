@@ -1316,14 +1316,14 @@ rounds:
 						return false, "", fmt.Errorf("step %s handle integration mutation: %w", stepName, err)
 					}
 				} else if stepName == types.StepDocument || stepName == types.StepLint {
-					hasSelectedMutation := false
+					hasProofInvalidatingMutation := false
 					for _, p := range verdict.ModifiedPaths {
-						if e.workGenManager.MatchesSelectedInputs(p) {
-							hasSelectedMutation = true
+						if e.workGenManager.MatchesSelectedInputs(p) || isGenerationControlPath(p) {
+							hasProofInvalidatingMutation = true
 							break
 						}
 					}
-					if hasSelectedMutation {
+					if hasProofInvalidatingMutation {
 						if _, err := e.workGenManager.HandleMutation(ctx, string(stepName)+"_selected_input_mutation", stepName, currentHead, verdict.ModifiedPaths); err != nil {
 							return false, "", fmt.Errorf("step %s handle selected-input mutation: %w", stepName, err)
 						}

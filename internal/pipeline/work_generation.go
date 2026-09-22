@@ -1202,14 +1202,19 @@ func (m *WorkGenerationManager) reconcileLedgerClosuresLocked(newGenID string, m
 	}
 
 	mutatedMap := make(map[string]bool)
+	generationControlMutation := false
 	for _, f := range mutatedFiles {
-		mutatedMap[f] = true
+		clean := filepath.ToSlash(f)
+		mutatedMap[clean] = true
+		if isGenerationControlPath(clean) {
+			generationControlMutation = true
+		}
 	}
 
 	for _, e := range entries {
 		if e.Status == types.FindingLedgerStatusClosedVerified {
 			// If file was mutated (or all if empty list)
-			if len(mutatedFiles) == 0 || mutatedMap[e.File] || mutatedMap[e.LastObservedFile] {
+			if len(mutatedFiles) == 0 || generationControlMutation || mutatedMap[filepath.ToSlash(e.File)] || mutatedMap[filepath.ToSlash(e.LastObservedFile)] {
 				event := &types.FindingLedgerEvent{
 					ID:           "fe-" + e.ID + "-" + newGenID,
 					EntryID:      e.ID,
