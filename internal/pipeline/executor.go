@@ -1219,13 +1219,17 @@ rounds:
 				unauthOutcome := UnauthorizedWriteOutcome(stepName, verdict.UnauthorizedPaths, verdict.Reason)
 				outcome.NeedsApproval = true
 				outcome.Findings = mergeFindingsJSON(outcome.Findings, unauthOutcome.Findings)
-			} else if len(verdict.ModifiedPaths) > 0 {
+			} else if len(verdict.ModifiedPaths) > 0 || verdict.HeadChanged {
 				currentHead, _ := git.HeadSHA(ctx, workDir)
 				if currentHead == "" {
 					currentHead = run.HeadSHA
 				}
 				if stepName == types.StepRebase {
-					if _, err := e.workGenManager.HandleMutation(ctx, "rebase_integration", stepName, currentHead, verdict.ModifiedPaths); err != nil {
+					mutated := verdict.ModifiedPaths
+					if len(mutated) == 0 && verdict.HeadChanged {
+						mutated = nil
+					}
+					if _, err := e.workGenManager.HandleMutation(ctx, "rebase_integration", stepName, currentHead, mutated); err != nil {
 						return false, "", fmt.Errorf("step %s handle integration mutation: %w", stepName, err)
 					}
 				} else if stepName == types.StepDocument || stepName == types.StepLint {

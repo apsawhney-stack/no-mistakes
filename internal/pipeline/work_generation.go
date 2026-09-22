@@ -34,6 +34,7 @@ type WriteSetVerdict struct {
 	Allowed           bool
 	UnauthorizedPaths []string
 	ModifiedPaths     []string
+	HeadChanged       bool
 	Reason            string
 }
 
@@ -247,6 +248,9 @@ func (m *WorkGenerationManager) RestoreSnapshot(ctx context.Context, pre *PhaseS
 	if err != nil {
 		return fmt.Errorf("verify restored worktree snapshot: %w", err)
 	}
+	if !sameSnapshotHashes(pre.FileHashes, restored) {
+		return fmt.Errorf("restore phase snapshot: restored worktree does not match pre-phase snapshot")
+	}
 	return nil
 }
 
@@ -274,7 +278,12 @@ func (m *WorkGenerationManager) CheckPhasePostState(ctx context.Context, phase t
 		}
 	}
 
-	if len(modifiedPaths) == 0 {
+	currentHead := ""
+	if m.workDir != "" {
+		currentHead, _ = git.HeadSHA(ctx, m.workDir)
+	}
+	headChanged := currentHead != "" && pre.HeadSHA != "" && currentHead != pre.HeadSHA
+	if len(modifiedPaths) == 0 && !headChanged {
 		return &WriteSetVerdict{Allowed: true}, nil
 	}
 	sort.Strings(modifiedPaths)
@@ -288,6 +297,9 @@ func (m *WorkGenerationManager) CheckPhasePostState(ctx context.Context, phase t
 	}
 
 	var unauthorized []string
+	if headChanged && len(allowedPatterns) == 0 {
+		unauthorized = append(unauthorized, "git-head")
+	}
 	for _, p := range modifiedPaths {
 		// 1. Engine-protected exclusions: forbidden across ALL phases
 		if m.isProtectedExclusion(p) {
@@ -307,11 +319,12 @@ func (m *WorkGenerationManager) CheckPhasePostState(ctx context.Context, phase t
 			Allowed:           false,
 			UnauthorizedPaths: unauthorized,
 			ModifiedPaths:     modifiedPaths,
+			HeadChanged:       headChanged,
 			Reason:            fmt.Sprintf("phase %s made unauthorized writes to %s", phase, strings.Join(unauthorized, ", ")),
 		}, nil
 	}
 
-	return &WriteSetVerdict{Allowed: true, ModifiedPaths: modifiedPaths}, nil
+	return &WriteSetVerdict{Allowed: true, ModifiedPaths: modifiedPaths, HeadChanged: headChanged}, nil
 }
 
 // HandleMutation creates Generation N+1 when selected inputs are mutated, invalidates dependent results,
@@ -964,6 +977,18 @@ func (m *WorkGenerationManager) isPathAllowed(file string, allowedPatterns []str
 		}
 	}
 	return false
+}
+
+func sameSnapshotHashes(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if b[k] != v {
+			return false
+		}
+	}
+	return true
 }
 
 func matchPattern(file, pattern string) bool {
