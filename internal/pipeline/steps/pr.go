@@ -239,6 +239,10 @@ func PublishFinalWorkAttestationToPR(ctx context.Context, sctx *pipeline.StepCon
 		return fmt.Errorf("query step results for final attestation: %w", err)
 	}
 	policy := attestationPolicyFrom(sctx)
+	policy.WorkGenerationID = att.GenerationID
+	policy.WorkGenerationDigest = att.GenerationDigest
+	policy.WorkPlanID = att.PlanID
+	policy.WorkPlanDigest = att.PlanDigest
 	policy.WorkEnvelopeDigest = att.FinalEnvelopeDigest
 	policy.WorkAttestationDigest = att.AttestationDigest
 	policy.WorkAttestation = att
