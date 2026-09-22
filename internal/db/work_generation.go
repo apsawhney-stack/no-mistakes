@@ -496,6 +496,29 @@ func (d *DB) MigrateLegacyWorkGenerationForRun(runID string) error {
 	return nil
 }
 
+// SetWorkGenerationPoison records an unresolved unauthorized-write poison for a run.
+func (d *DB) SetWorkGenerationPoison(runID string, phase types.StepName, reason string) error {
+	_, err := d.sql.Exec(`INSERT INTO work_generation_poison (run_id, phase, reason, created_at) VALUES (?, ?, ?, ?)
+		ON CONFLICT(run_id) DO UPDATE SET phase = excluded.phase, reason = excluded.reason, created_at = excluded.created_at`, runID, string(phase), reason, now())
+	if err != nil {
+		return fmt.Errorf("set work generation poison: %w", err)
+	}
+	return nil
+}
+
+// GetWorkGenerationPoison returns the unresolved unauthorized-write poison for a run.
+func (d *DB) GetWorkGenerationPoison(runID string) (types.StepName, string, error) {
+	var phase, reason string
+	err := d.sql.QueryRow(`SELECT phase, reason FROM work_generation_poison WHERE run_id = ?`, runID).Scan(&phase, &reason)
+	if err == sql.ErrNoRows {
+		return "", "", nil
+	}
+	if err != nil {
+		return "", "", fmt.Errorf("get work generation poison: %w", err)
+	}
+	return types.StepName(phase), reason, nil
+}
+
 // GetWorkGenerationSummary builds a publishable summary for a run.
 func (d *DB) GetWorkGenerationSummary(runID string) (*types.WorkGenerationSummary, error) {
 	currentGen, err := d.GetCurrentWorkGeneration(runID)

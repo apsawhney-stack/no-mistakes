@@ -203,6 +203,16 @@ func (m *WorkGenerationManager) CheckPhasePreState(ctx context.Context, phase ty
 	if m.poison != nil {
 		return nil, fmt.Errorf("worktree has unresolved unauthorized-write poison from phase %s: %s", m.poison.phase, m.poison.reason)
 	}
+	if m.db != nil && m.runID != "" {
+		phase, reason, err := m.db.GetWorkGenerationPoison(m.runID)
+		if err != nil {
+			return nil, err
+		}
+		if reason != "" {
+			m.poison = &poisonEvidence{phase: phase, reason: reason}
+			return nil, fmt.Errorf("worktree has unresolved unauthorized-write poison from phase %s: %s", phase, reason)
+		}
+	}
 
 	headSHA := ""
 	if m.workDir != "" {
@@ -260,6 +270,11 @@ func (m *WorkGenerationManager) RestoreSnapshot(ctx context.Context, pre *PhaseS
 	if !sameSnapshotHashes(pre.FileHashes, restored) {
 		reason := "restored worktree does not match pre-phase snapshot"
 		m.poison = &poisonEvidence{phase: pre.Phase, reason: reason}
+		if m.db != nil && m.runID != "" {
+			if err := m.db.SetWorkGenerationPoison(m.runID, pre.Phase, reason); err != nil {
+				return err
+			}
+		}
 		return fmt.Errorf("restore phase snapshot: %s", reason)
 	}
 	return nil

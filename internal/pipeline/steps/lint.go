@@ -34,15 +34,17 @@ func (s *LintStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 				return lintOutcomeFromHousekeeping(sctx, stash)
 			}
 		}
-		sctx.Log("no lint command configured, asking agent to lint and fix...")
+		sctx.Log("no lint command configured, asking agent to lint...")
 		reassessHistory := executionContextPromptSection(sctx.WorkDir) + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx)
-		prompt := fmt.Sprintf(
-			`Detect the linting and formatting tools for this project, run the relevant checks yourself, apply safe fixes, and verify the result.
+		task := `Detect the linting and formatting tools for this project and run the relevant checks yourself without modifying files.
 
-Context:
-- branch: %s
-- base commit: %s
-- target commit: %s
+Task:
+- Discover the configured linters and formatters for this repository.
+- Only lint the relevant changed files when possible.
+- Report only unresolved lint, format, or static-analysis issues as structured findings.
+- If everything is clean, return an empty findings array.`
+		if sctx.Fixing {
+			task = `Detect the linting and formatting tools for this project, run the relevant checks yourself, apply safe fixes, and verify the result.
 
 Task:
 - Discover the configured linters and formatters for this repository.
@@ -50,7 +52,15 @@ Task:
 - Apply safe formatter, linter, and static-analysis fixes yourself.
 - Re-run the relevant checks after fixing.
 - Report only unresolved lint, format, or static-analysis issues as structured findings.
-- If everything is clean or fixed, return an empty findings array.
+- If everything is clean or fixed, return an empty findings array.`
+		}
+		prompt := fmt.Sprintf(
+			`%s
+
+Context:
+- branch: %s
+- base commit: %s
+- target commit: %s
 
 Rules:
 - Do not run tests or broader behavioral validation.
@@ -58,6 +68,7 @@ Rules:
 - Do not report issues you already fixed.
 - The summary must be one concise sentence fragment suitable for a git commit subject.
 - Keep the summary under 10 words.%s`,
+			task,
 			sctx.Run.Branch,
 			baseSHA,
 			sctx.Run.HeadSHA,
@@ -69,8 +80,9 @@ Rules:
 Previous lint findings to address:
 ` + sanitizedPreviousFindingsForPrompt(sctx.PreviousFindings)
 		}
+		runPrompt := fixerPrompt(prompt)
 		result, err := sctx.RunAgentContext(ctx, agent.RunOpts{
-			Prompt:     fixerPrompt(prompt),
+			Prompt:     runPrompt,
 			CWD:        sctx.WorkDir,
 			JSONSchema: findingsSchema,
 			OnChunk:    sctx.LogChunk,

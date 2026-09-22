@@ -321,6 +321,13 @@ CREATE TABLE IF NOT EXISTS work_phase_results (
 CREATE INDEX IF NOT EXISTS idx_work_phase_results_run_gen
     ON work_phase_results (run_id, generation_id, phase);
 
+CREATE TABLE IF NOT EXISTS work_generation_poison (
+    run_id      TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+    phase       TEXT NOT NULL,
+    reason      TEXT NOT NULL,
+    created_at  INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS work_attestations (
     id                        TEXT PRIMARY KEY,
     run_id                    TEXT NOT NULL UNIQUE REFERENCES runs(id) ON DELETE CASCADE,
@@ -603,6 +610,12 @@ var migrationStatements = []string{
 		invalidated_at             INTEGER
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_work_phase_results_run_gen ON work_phase_results (run_id, generation_id, phase)`,
+	`CREATE TABLE IF NOT EXISTS work_generation_poison (
+		run_id      TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+		phase       TEXT NOT NULL,
+		reason      TEXT NOT NULL,
+		created_at  INTEGER NOT NULL
+	)`,
 	`CREATE TABLE IF NOT EXISTS work_attestations (
 		id                        TEXT PRIMARY KEY,
 		run_id                    TEXT NOT NULL UNIQUE REFERENCES runs(id) ON DELETE CASCADE,
