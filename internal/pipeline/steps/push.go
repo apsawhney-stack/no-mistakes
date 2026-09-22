@@ -87,6 +87,15 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		findings, _ := json.Marshal(Findings{Summary: recordedDecisionReviewRequest})
 		return &pipeline.StepOutcome{RestartFrom: types.StepReview, Findings: string(findings)}, nil
 	}
+	if sctx.PublicationPermit != nil {
+		if err := sctx.PublicationPermit(headBeingPushed); err != nil {
+			if errors.Is(err, pipeline.ErrPublicationDeferred) {
+				sctx.Log("publication deferred until write-set and generation checks complete")
+				return &pipeline.StepOutcome{}, nil
+			}
+			return nil, err
+		}
+	}
 	// This run's own review/test/document have already completed by now (see
 	// AllSteps' fixed order), so these are honest statuses to attest for the
 	// head about to be pushed - see attestHeadBeforePush.

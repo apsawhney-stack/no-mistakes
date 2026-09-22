@@ -12,6 +12,7 @@ import (
 )
 
 var ErrFatalGateReconciliation = errors.New("fatal gate reconciliation")
+var ErrPublicationDeferred = errors.New("publication deferred until generation-bound validation completes")
 
 // StepContext provides shared resources to pipeline steps during execution.
 type StepContext struct {
@@ -77,6 +78,8 @@ type StepContext struct {
 	// machinery remains role-generic for legacy recovery; nil runs every
 	// invocation cold.
 	Sessions *RunSessions
+	// PublicationPermit verifies that a step may publish the exact head now.
+	PublicationPermit func(headSHA string) error
 	// Shared carries in-memory run-scoped results one step hands to a later
 	// step in the same run (e.g. the combined document+lint pass).
 	Shared             *RunShared

@@ -1233,6 +1233,25 @@ rounds:
 				return false, "", fmt.Errorf("step %s check pre-state: %w", stepName, snapErr)
 			}
 		}
+		if e.workGenManager != nil && preSnapshot != nil {
+			sctx.PublicationPermit = func(headSHA string) error {
+				currentHead, err := git.HeadSHA(ctx, workDir)
+				if err != nil {
+					return fmt.Errorf("resolve publication head: %w", err)
+				}
+				if headSHA != "" && currentHead != headSHA {
+					return fmt.Errorf("publication head %s does not match worktree head %s", headSHA, currentHead)
+				}
+				verdict, err := e.workGenManager.CheckPhasePostState(ctx, stepName, sctx.Fixing, preSnapshot)
+				if err != nil {
+					return err
+				}
+				if !verdict.Allowed || len(verdict.ModifiedPaths) > 0 || verdict.HeadChanged {
+					return ErrPublicationDeferred
+				}
+				return nil
+			}
+		}
 		isProtectedPathRefusal := false
 		outcome, err := step.Execute(sctx)
 		if refusal := ProtectedPathOutcome(err); refusal != nil {
@@ -1314,9 +1333,9 @@ rounds:
 							return false, "", fmt.Errorf("step %s handle narrative mutation: %w", stepName, err)
 						}
 					}
-				} else if sctx.Fixing || (preSnapshot != nil && currentHead != preSnapshot.HeadSHA && (stepName == types.StepCI || stepName == types.StepReview || stepName == types.StepTest)) {
-					if _, err := e.workGenManager.HandleMutation(ctx, fmt.Sprintf("%s_fix_round_%d", stepName, roundNum), stepName, currentHead, verdict.ModifiedPaths); err != nil {
-						return false, "", fmt.Errorf("step %s handle fix mutation: %w", stepName, err)
+				} else if sctx.Fixing || stepName.Order() > types.StepReview.Order() || (preSnapshot != nil && currentHead != preSnapshot.HeadSHA && stepName == types.StepReview) {
+					if _, err := e.workGenManager.HandleMutation(ctx, fmt.Sprintf("%s_mutation_round_%d", stepName, roundNum), stepName, currentHead, verdict.ModifiedPaths); err != nil {
+						return false, "", fmt.Errorf("step %s handle mutation: %w", stepName, err)
 					}
 					if stepName.Order() > types.StepReview.Order() {
 						outcome.RestartFrom = types.StepReview

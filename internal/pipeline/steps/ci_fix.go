@@ -753,6 +753,15 @@ func (s *CIStep) recordLocalRepair(sctx *pipeline.StepContext, headSHA string) (
 // the database write have all succeeded, so a partial failure leaves the run on
 // the pre-repair head and the next fix attempt re-enters this path.
 func (s *CIStep) publishRepair(sctx *pipeline.StepContext, headSHA string) (ciRepairResult, error) {
+	if sctx.PublicationPermit != nil {
+		if err := sctx.PublicationPermit(headSHA); err != nil {
+			if errors.Is(err, pipeline.ErrPublicationDeferred) {
+				sctx.Log("publication deferred until write-set and generation checks complete")
+				return s.recordLocalRepair(sctx, headSHA)
+			}
+			return ciRepairResult{}, err
+		}
+	}
 	if err := publishRunHead(sctx, headSHA, headSHA, nil); err != nil {
 		if errors.Is(err, errAttestationWriteFailed) {
 			return ciRepairResult{}, fmt.Errorf("%w at %s: %v", errCIAttestationUnsettled, shortObjectID(headSHA), err)
