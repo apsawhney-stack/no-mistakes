@@ -2,11 +2,14 @@ package pipeline
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -166,6 +169,66 @@ func (e *Executor) runEvidenceDir(runID string) string {
 		configured = e.config.Test.Evidence.LocalRoot
 	}
 	return e.paths.RunEvidenceDir(configured, runID)
+}
+
+func publicEvidenceIdentity(runID string, stepName types.StepName, evidenceDir string) (string, string, error) {
+	if strings.TrimSpace(evidenceDir) == "" {
+		return "", "", nil
+	}
+	info, err := os.Stat(evidenceDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", "", nil
+		}
+		return "", "", err
+	}
+	if !info.IsDir() {
+		return "", "", fmt.Errorf("evidence path is not a directory")
+	}
+	var rels []string
+	if err := filepath.WalkDir(evidenceDir, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if path == evidenceDir {
+			return nil
+		}
+		rel, err := filepath.Rel(evidenceDir, path)
+		if err != nil {
+			return err
+		}
+		rels = append(rels, filepath.ToSlash(rel))
+		return nil
+	}); err != nil {
+		return "", "", err
+	}
+	sort.Strings(rels)
+	h := sha256.New()
+	for _, rel := range rels {
+		path := filepath.Join(evidenceDir, filepath.FromSlash(rel))
+		info, err := os.Lstat(path)
+		if err != nil {
+			return "", "", err
+		}
+		fmt.Fprintf(h, "%s\x00%d\x00", rel, info.Mode())
+		switch {
+		case info.Mode().Type() == 0:
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return "", "", err
+			}
+			h.Write(data)
+		case info.Mode()&os.ModeSymlink != 0:
+			target, err := os.Readlink(path)
+			if err != nil {
+				return "", "", err
+			}
+			h.Write([]byte(target))
+		}
+		h.Write([]byte{0})
+	}
+	identitySeed := sha256.Sum256([]byte(runID + "\x00" + string(stepName)))
+	return "evidence-" + hex.EncodeToString(identitySeed[:8]), "sha256:" + hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // SetGateReconcileTimings overrides the interval between approval-gate
@@ -1622,10 +1685,9 @@ done:
 	if e.workGenManager != nil {
 		switch status {
 		case types.StepStatusCompleted:
-			evidenceID := ""
-			outputDigest := ""
-			if sctx.EvidenceDir != "" {
-				evidenceID = sctx.EvidenceDir
+			evidenceID, outputDigest, evidenceErr := publicEvidenceIdentity(run.ID, stepName, sctx.EvidenceDir)
+			if evidenceErr != nil {
+				return false, "", fmt.Errorf("record step %s evidence identity: %w", stepName, evidenceErr)
 			}
 			_, _ = e.workGenManager.RecordPhaseResult(ctx, stepName, types.PhaseResultStatusPassed, string(stepName), evidenceID, outputDigest, nil)
 			if stepName == types.StepReview {
