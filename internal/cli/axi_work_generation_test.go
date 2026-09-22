@@ -21,7 +21,20 @@ func TestRunObjectProjectionPublishesWorkGeneration(t *testing.T) {
 			CurrentGenerationDigest:  "abc123gen",
 			PlanID:                   "conservative-default",
 			WriteSetVerdict:          "passed",
-			AttestationID:            "",
+			AttestationID:            "att-run-gen-1",
+			AttestationDigest:        "attdigest123",
+			WorkAttestation: &types.WorkAttestation{
+				ID:                  "att-run-gen-1",
+				ProtocolVersion:     types.WorkGenerationProtocolVersion,
+				RunID:               "run-gen-1",
+				GenerationID:        "gen-run-gen-1-2",
+				GenerationDigest:    "abc123gen",
+				PlanID:              "conservative-default",
+				PlanDigest:          "plandigest123",
+				FinalHeadSHA:        "head123",
+				FinalEnvelopeDigest: "envdigest123",
+				AttestationDigest:   "attdigest123",
+			},
 		},
 	}
 	out := axiDoc(runObjectField(rv))
@@ -32,7 +45,10 @@ func TestRunObjectProjectionPublishesWorkGeneration(t *testing.T) {
 		"generation_digest: abc123gen",
 		"plan_id: conservative-default",
 		"write_set_verdict: passed",
-		"has_attestation: false",
+		"has_attestation: true",
+		"attestation_digest: attdigest123",
+		"work_attestation:",
+		"\\\"attestation_digest\\\":\\\"attdigest123\\\"",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("run projection missing %q:\n%s", want, out)

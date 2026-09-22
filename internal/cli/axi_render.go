@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"strings"
@@ -522,14 +523,23 @@ func runObjectFieldWithKey(key string, rv runView) toon.Field {
 		)})
 	}
 	if rv.WorkGeneration != nil {
-		fields = append(fields, toon.Field{Key: "work_generation", Value: toon.NewObject(
-			toon.Field{Key: "version", Value: rv.WorkGeneration.ProtocolVersion},
-			toon.Field{Key: "current_generation", Value: rv.WorkGeneration.CurrentGenerationOrdinal},
-			toon.Field{Key: "generation_digest", Value: rv.WorkGeneration.CurrentGenerationDigest},
-			toon.Field{Key: "plan_id", Value: rv.WorkGeneration.PlanID},
-			toon.Field{Key: "write_set_verdict", Value: rv.WorkGeneration.WriteSetVerdict},
-			toon.Field{Key: "has_attestation", Value: rv.WorkGeneration.AttestationID != ""},
-		)})
+		wgFields := []toon.Field{
+			{Key: "version", Value: rv.WorkGeneration.ProtocolVersion},
+			{Key: "current_generation", Value: rv.WorkGeneration.CurrentGenerationOrdinal},
+			{Key: "generation_digest", Value: rv.WorkGeneration.CurrentGenerationDigest},
+			{Key: "plan_id", Value: rv.WorkGeneration.PlanID},
+			{Key: "write_set_verdict", Value: rv.WorkGeneration.WriteSetVerdict},
+			{Key: "has_attestation", Value: rv.WorkGeneration.AttestationID != ""},
+		}
+		if rv.WorkGeneration.AttestationDigest != "" {
+			wgFields = append(wgFields, toon.Field{Key: "attestation_digest", Value: rv.WorkGeneration.AttestationDigest})
+		}
+		if rv.WorkGeneration.WorkAttestation != nil {
+			if payload, err := json.Marshal(rv.WorkGeneration.WorkAttestation); err == nil {
+				wgFields = append(wgFields, toon.Field{Key: "work_attestation", Value: string(payload)})
+			}
+		}
+		fields = append(fields, toon.Field{Key: "work_generation", Value: toon.NewObject(wgFields...)})
 	}
 
 	rows := make([]stepRow, 0, len(rv.Steps))

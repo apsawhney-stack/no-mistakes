@@ -548,6 +548,7 @@ func (d *DB) GetWorkGenerationSummary(runID string) (*types.WorkGenerationSummar
 		sum.AttestationID = att.ID
 		sum.AttestationDigest = att.AttestationDigest
 		sum.FinalEnvelopeDigest = att.FinalEnvelopeDigest
+		sum.WorkAttestation = att
 	}
 
 	return sum, nil

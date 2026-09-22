@@ -269,26 +269,10 @@ func (m *WorkGenerationManager) CheckPhasePostState(ctx context.Context, phase t
 	}
 	sort.Strings(modifiedPaths)
 
-	currentHead := ""
-	if m.workDir != "" {
-		currentHead, _ = git.HeadSHA(ctx, m.workDir)
-	}
-	isFixingOrCommittedRepair := fixing || (currentHead != "" && pre.HeadSHA != "" && currentHead != pre.HeadSHA && (phase == types.StepCI || phase == types.StepReview || phase == types.StepTest))
-
 	// Resolve allowed patterns for phase
 	var allowedPatterns []string
-	if isFixingOrCommittedRepair {
-		if patterns, ok := m.plan.PhaseWriteSets[string(phase)+"_fix"]; ok {
-			allowedPatterns = patterns
-		} else if phase == types.StepReview || phase == types.StepCI || phase == types.StepTest {
-			if patterns, ok := m.plan.PhaseWriteSets[string(phase)]; ok && len(patterns) > 0 {
-				allowedPatterns = patterns
-			} else {
-				allowedPatterns = []string{"**/*"}
-			}
-		} else {
-			allowedPatterns = m.plan.PhaseWriteSets[string(phase)]
-		}
+	if fixing {
+		allowedPatterns = m.plan.PhaseWriteSets[string(phase)+"_fix"]
 	} else {
 		allowedPatterns = m.plan.PhaseWriteSets[string(phase)]
 	}

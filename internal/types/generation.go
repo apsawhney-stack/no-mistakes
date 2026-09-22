@@ -210,6 +210,7 @@ type WorkGenerationSummary struct {
 	AttestationID            string                   `json:"attestation_id,omitempty"`
 	AttestationDigest        string                   `json:"attestation_digest,omitempty"`
 	FinalEnvelopeDigest      string                   `json:"final_envelope_digest,omitempty"`
+	WorkAttestation          *WorkAttestation         `json:"work_attestation,omitempty"`
 	LedgerRelationship       string                   `json:"ledger_relationship,omitempty"`
 }
 
