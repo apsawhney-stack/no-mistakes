@@ -94,6 +94,9 @@ func (r *ValidationPlanRaw) ToValidationPlan(cfg *Config) types.ValidationPlan {
 	for k, v := range r.PhaseWriteSets {
 		writeSets[k] = append([]string(nil), v...)
 	}
+	if _, ok := writeSets["rebase"]; !ok {
+		writeSets["rebase"] = []string{"**/*"}
+	}
 	if _, ok := writeSets["document"]; !ok {
 		writeSets["document"] = []string{"docs/**", "*.md", "README*"}
 	}
@@ -152,6 +155,7 @@ func DefaultConservativeValidationPlan(cfg *Config) types.ValidationPlan {
 		}
 	}
 	writeSets := map[string][]string{
+		"rebase":     {"**/*"},
 		"review":     {},
 		"review_fix": {"**/*"},
 		"test":       {},

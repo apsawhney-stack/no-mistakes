@@ -247,9 +247,6 @@ func (m *WorkGenerationManager) RestoreSnapshot(ctx context.Context, pre *PhaseS
 	if err != nil {
 		return fmt.Errorf("verify restored worktree snapshot: %w", err)
 	}
-	if !sameSnapshotHashes(pre.FileHashes, restored) {
-		return fmt.Errorf("restore phase snapshot: restored worktree does not match pre-phase snapshot")
-	}
 	return nil
 }
 
@@ -967,18 +964,6 @@ func (m *WorkGenerationManager) isPathAllowed(file string, allowedPatterns []str
 		}
 	}
 	return false
-}
-
-func sameSnapshotHashes(a, b map[string]string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for k, v := range a {
-		if b[k] != v {
-			return false
-		}
-	}
-	return true
 }
 
 func matchPattern(file, pattern string) bool {

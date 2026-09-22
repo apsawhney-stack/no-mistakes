@@ -1224,7 +1224,11 @@ rounds:
 				if currentHead == "" {
 					currentHead = run.HeadSHA
 				}
-				if stepName == types.StepDocument || stepName == types.StepLint {
+				if stepName == types.StepRebase {
+					if _, err := e.workGenManager.HandleMutation(ctx, "rebase_integration", stepName, currentHead, verdict.ModifiedPaths); err != nil {
+						return false, "", fmt.Errorf("step %s handle integration mutation: %w", stepName, err)
+					}
+				} else if stepName == types.StepDocument || stepName == types.StepLint {
 					hasSelectedMutation := false
 					for _, p := range verdict.ModifiedPaths {
 						if e.workGenManager.MatchesSelectedInputs(p) {
