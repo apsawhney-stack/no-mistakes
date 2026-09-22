@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -82,6 +83,30 @@ func NewWorkGenerationManager(database *db.DB, runID, repoID, workDir string, cf
 		plan.PlanDigest = types.ComputePlanDigest(&plan)
 	}
 
+	if database != nil && runID != "" {
+		if err := database.MigrateLegacyWorkGenerationForRun(runID); err != nil {
+			return nil, fmt.Errorf("migrate legacy work generation: %w", err)
+		}
+		current, err := database.GetCurrentWorkGeneration(runID)
+		if err != nil {
+			return nil, fmt.Errorf("load pinned work generation plan: %w", err)
+		}
+		if current != nil {
+			if strings.TrimSpace(current.PlanYAML) != "" {
+				var pinned types.ValidationPlan
+				if err := json.Unmarshal([]byte(current.PlanYAML), &pinned); err != nil {
+					return nil, fmt.Errorf("decode pinned work generation plan: %w", err)
+				}
+				if pinned.PlanDigest == "" {
+					pinned.PlanDigest = types.ComputePlanDigest(&pinned)
+				}
+				plan = pinned
+			} else if current.PlanDigest != "" && current.PlanDigest != plan.PlanDigest {
+				return nil, fmt.Errorf("work generation plan digest drift: pinned %s, recovered %s", current.PlanDigest, plan.PlanDigest)
+			}
+		}
+	}
+
 	m := &WorkGenerationManager{
 		db:      database,
 		runID:   runID,
@@ -89,12 +114,6 @@ func NewWorkGenerationManager(database *db.DB, runID, repoID, workDir string, cf
 		workDir: workDir,
 		config:  cfg,
 		plan:    plan,
-	}
-
-	if database != nil && runID != "" {
-		if err := database.MigrateLegacyWorkGenerationForRun(runID); err != nil {
-			return nil, fmt.Errorf("migrate legacy work generation: %w", err)
-		}
 	}
 
 	return m, nil
@@ -167,6 +186,11 @@ func (m *WorkGenerationManager) EnsureGeneration(ctx context.Context, startingHe
 		types.GenerationCauseInitial,
 	)
 
+	planSnapshot, err := json.Marshal(m.plan)
+	if err != nil {
+		return nil, fmt.Errorf("marshal validation plan snapshot: %w", err)
+	}
+
 	gen0 := &types.WorkGeneration{
 		ID:                   "gen-" + m.runID + "-0",
 		RunID:                m.runID,
@@ -176,6 +200,7 @@ func (m *WorkGenerationManager) EnsureGeneration(ctx context.Context, startingHe
 		GenerationDigest:     genDigest,
 		PlanID:               m.plan.PlanID,
 		PlanDigest:           m.plan.PlanDigest,
+		PlanYAML:             string(planSnapshot),
 		GitHeadSHA:           startingHeadSHA,
 		GitTreeSHA:           treeSHA,
 		InputManifestDigest:  manifest.Digest,
@@ -456,6 +481,11 @@ func (m *WorkGenerationManager) HandleMutation(ctx context.Context, cause string
 		cause,
 	)
 
+	planSnapshot, err := json.Marshal(m.plan)
+	if err != nil {
+		return nil, fmt.Errorf("marshal validation plan snapshot: %w", err)
+	}
+
 	nextGen := &types.WorkGeneration{
 		ID:                     fmt.Sprintf("gen-%s-%d", m.runID, newOrdinal),
 		RunID:                  m.runID,
@@ -467,6 +497,7 @@ func (m *WorkGenerationManager) HandleMutation(ctx context.Context, cause string
 		GenerationDigest:       newDigest,
 		PlanID:                 m.plan.PlanID,
 		PlanDigest:             m.plan.PlanDigest,
+		PlanYAML:               string(planSnapshot),
 		GitHeadSHA:             newHeadSHA,
 		GitTreeSHA:             treeSHA,
 		InputManifestDigest:    manifest.Digest,

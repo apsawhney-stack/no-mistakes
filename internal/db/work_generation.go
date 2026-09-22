@@ -570,6 +570,17 @@ func (d *DB) GetWorkGenerationSummary(runID string) (*types.WorkGenerationSummar
 		return nil, err
 	}
 
+	writeSetVerdict := types.WriteSetVerdictClean
+	var unauthorized []string
+	poisonPhase, poisonReason, _, err := d.GetWorkGenerationPoison(runID)
+	if err != nil {
+		return nil, err
+	}
+	if poisonReason != "" {
+		writeSetVerdict = types.WriteSetVerdictUnauthorized
+		unauthorized = append(unauthorized, fmt.Sprintf("%s: %s", poisonPhase, poisonReason))
+	}
+
 	sum := &types.WorkGenerationSummary{
 		ProtocolVersion:          types.WorkGenerationProtocolVersion,
 		RunID:                    runID,
@@ -581,7 +592,8 @@ func (d *DB) GetWorkGenerationSummary(runID string) (*types.WorkGenerationSummar
 		PlanID:                   currentGen.PlanID,
 		PlanVersion:              "v1",
 		PlanDigest:               currentGen.PlanDigest,
-		WriteSetVerdict:          types.WriteSetVerdictClean,
+		WriteSetVerdict:          writeSetVerdict,
+		UnauthorizedWrites:       unauthorized,
 		PhaseResults:             summaries,
 	}
 
