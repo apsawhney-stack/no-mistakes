@@ -563,6 +563,11 @@ func (m *WorkGenerationManager) AssertAcceptanceWithCIEvidence(ctx context.Conte
 	if currentGen == nil {
 		return nil, fmt.Errorf("terminal acceptance refused: no active work generation exists for run %s", m.runID)
 	}
+	if _, reason, _, err := m.db.GetWorkGenerationPoison(m.runID); err != nil {
+		return nil, err
+	} else if reason != "" {
+		return nil, fmt.Errorf("terminal acceptance refused: unresolved unauthorized-write poison: %s", reason)
+	}
 
 	results, err := m.db.GetWorkPhaseResultsByGeneration(m.runID, currentGen.ID)
 	if err != nil {

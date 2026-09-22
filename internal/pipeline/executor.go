@@ -1932,7 +1932,7 @@ func (e *Executor) reconcileApprovalGate(ctx context.Context, step Step, sctx *S
 	if !ok {
 		return false, nil
 	}
-	if HasProtectedPathRefusal(findingsJSON) {
+	if HasProtectedPathRefusal(findingsJSON) || HasUnauthorizedWriteRefusal(findingsJSON) {
 		return false, nil
 	}
 	timeout := e.gateReconcileTimeout
