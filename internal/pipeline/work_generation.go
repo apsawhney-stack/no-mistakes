@@ -345,6 +345,18 @@ func (m *WorkGenerationManager) CheckPhasePostState(ctx context.Context, phase t
 		currentHead, _ = git.HeadSHA(ctx, m.workDir)
 	}
 	headChanged := currentHead != "" && pre.HeadSHA != "" && currentHead != pre.HeadSHA
+	if headChanged {
+		historyPaths, err := m.phaseHistoryPaths(ctx, pre.HeadSHA, currentHead)
+		if err != nil {
+			return nil, err
+		}
+		modifiedPaths = appendUniquePaths(modifiedPaths, historyPaths...)
+	}
+	indexPaths, err := m.indexModifiedPaths(ctx)
+	if err != nil {
+		return nil, err
+	}
+	modifiedPaths = appendUniquePaths(modifiedPaths, indexPaths...)
 	if len(modifiedPaths) == 0 && !headChanged {
 		return &WriteSetVerdict{Allowed: true}, nil
 	}
@@ -387,6 +399,57 @@ func (m *WorkGenerationManager) CheckPhasePostState(ctx context.Context, phase t
 	}
 
 	return &WriteSetVerdict{Allowed: true, ModifiedPaths: modifiedPaths, HeadChanged: headChanged}, nil
+}
+
+func (m *WorkGenerationManager) phaseHistoryPaths(ctx context.Context, base, head string) ([]string, error) {
+	if strings.TrimSpace(m.workDir) == "" || strings.TrimSpace(base) == "" || strings.TrimSpace(head) == "" || base == head {
+		return nil, nil
+	}
+	out, err := git.Run(ctx, m.workDir, "log", "--format=", "--name-only", "--no-renames", base+".."+head)
+	if err != nil {
+		return nil, fmt.Errorf("list phase commit-range paths: %w", err)
+	}
+	return splitGitPathLines(out), nil
+}
+
+func (m *WorkGenerationManager) indexModifiedPaths(ctx context.Context) ([]string, error) {
+	if strings.TrimSpace(m.workDir) == "" {
+		return nil, nil
+	}
+	if _, err := git.Run(ctx, m.workDir, "rev-parse", "--is-inside-work-tree"); err != nil {
+		return nil, nil
+	}
+	out, err := git.Run(ctx, m.workDir, "diff", "--cached", "--name-only", "--no-renames")
+	if err != nil {
+		return nil, fmt.Errorf("list phase index paths: %w", err)
+	}
+	return splitGitPathLines(out), nil
+}
+
+func splitGitPathLines(out string) []string {
+	var paths []string
+	for _, line := range strings.Split(out, "\n") {
+		p := strings.TrimSpace(line)
+		if p == "" {
+			continue
+		}
+		paths = append(paths, filepath.ToSlash(p))
+	}
+	return paths
+}
+
+func appendUniquePaths(paths []string, extra ...string) []string {
+	seen := make(map[string]bool, len(paths)+len(extra))
+	var out []string
+	for _, p := range append(paths, extra...) {
+		p = filepath.ToSlash(strings.TrimSpace(p))
+		if p == "" || seen[p] {
+			continue
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
+	return out
 }
 
 // HandleMutation creates Generation N+1 when selected inputs are mutated, invalidates dependent results,
