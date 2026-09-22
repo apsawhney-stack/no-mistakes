@@ -200,17 +200,28 @@ func (m *WorkGenerationManager) EnsureGeneration(ctx context.Context, startingHe
 func (m *WorkGenerationManager) CheckPhasePreState(ctx context.Context, phase types.StepName) (*PhaseSnapshot, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.poison != nil {
+	if m.poison != nil && (m.db == nil || m.runID == "") {
 		return nil, fmt.Errorf("worktree has unresolved unauthorized-write poison from phase %s: %s", m.poison.phase, m.poison.reason)
 	}
 	if m.db != nil && m.runID != "" {
-		phase, reason, err := m.db.GetWorkGenerationPoison(m.runID)
+		phase, reason, preHashes, err := m.db.GetWorkGenerationPoison(m.runID)
 		if err != nil {
 			return nil, err
 		}
 		if reason != "" {
-			m.poison = &poisonEvidence{phase: phase, reason: reason}
-			return nil, fmt.Errorf("worktree has unresolved unauthorized-write poison from phase %s: %s", phase, reason)
+			current, err := m.scanWorkTreeHashesLocked()
+			if err != nil {
+				return nil, err
+			}
+			if sameSnapshotHashes(preHashes, current) {
+				if err := m.db.ClearWorkGenerationPoison(m.runID); err != nil {
+					return nil, err
+				}
+				m.poison = nil
+			} else {
+				m.poison = &poisonEvidence{phase: phase, reason: reason}
+				return nil, fmt.Errorf("worktree has unresolved unauthorized-write poison from phase %s: %s", phase, reason)
+			}
 		}
 	}
 
@@ -271,7 +282,7 @@ func (m *WorkGenerationManager) RestoreSnapshot(ctx context.Context, pre *PhaseS
 		reason := "restored worktree does not match pre-phase snapshot"
 		m.poison = &poisonEvidence{phase: pre.Phase, reason: reason}
 		if m.db != nil && m.runID != "" {
-			if err := m.db.SetWorkGenerationPoison(m.runID, pre.Phase, reason); err != nil {
+			if err := m.db.SetWorkGenerationPoison(m.runID, pre.Phase, reason, pre.FileHashes); err != nil {
 				return err
 			}
 		}

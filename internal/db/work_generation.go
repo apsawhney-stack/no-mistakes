@@ -497,9 +497,13 @@ func (d *DB) MigrateLegacyWorkGenerationForRun(runID string) error {
 }
 
 // SetWorkGenerationPoison records an unresolved unauthorized-write poison for a run.
-func (d *DB) SetWorkGenerationPoison(runID string, phase types.StepName, reason string) error {
-	_, err := d.sql.Exec(`INSERT INTO work_generation_poison (run_id, phase, reason, created_at) VALUES (?, ?, ?, ?)
-		ON CONFLICT(run_id) DO UPDATE SET phase = excluded.phase, reason = excluded.reason, created_at = excluded.created_at`, runID, string(phase), reason, now())
+func (d *DB) SetWorkGenerationPoison(runID string, phase types.StepName, reason string, preHashes map[string]string) error {
+	preJSON, err := json.Marshal(preHashes)
+	if err != nil {
+		return fmt.Errorf("marshal work generation poison pre-hashes: %w", err)
+	}
+	_, err = d.sql.Exec(`INSERT INTO work_generation_poison (run_id, phase, reason, pre_hashes_json, created_at) VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(run_id) DO UPDATE SET phase = excluded.phase, reason = excluded.reason, pre_hashes_json = excluded.pre_hashes_json, created_at = excluded.created_at`, runID, string(phase), reason, string(preJSON), now())
 	if err != nil {
 		return fmt.Errorf("set work generation poison: %w", err)
 	}
@@ -507,16 +511,30 @@ func (d *DB) SetWorkGenerationPoison(runID string, phase types.StepName, reason 
 }
 
 // GetWorkGenerationPoison returns the unresolved unauthorized-write poison for a run.
-func (d *DB) GetWorkGenerationPoison(runID string) (types.StepName, string, error) {
-	var phase, reason string
-	err := d.sql.QueryRow(`SELECT phase, reason FROM work_generation_poison WHERE run_id = ?`, runID).Scan(&phase, &reason)
+func (d *DB) GetWorkGenerationPoison(runID string) (types.StepName, string, map[string]string, error) {
+	var phase, reason, preJSON string
+	err := d.sql.QueryRow(`SELECT phase, reason, pre_hashes_json FROM work_generation_poison WHERE run_id = ?`, runID).Scan(&phase, &reason, &preJSON)
 	if err == sql.ErrNoRows {
-		return "", "", nil
+		return "", "", nil, nil
 	}
 	if err != nil {
-		return "", "", fmt.Errorf("get work generation poison: %w", err)
+		return "", "", nil, fmt.Errorf("get work generation poison: %w", err)
 	}
-	return types.StepName(phase), reason, nil
+	preHashes := map[string]string{}
+	if preJSON != "" {
+		if err := json.Unmarshal([]byte(preJSON), &preHashes); err != nil {
+			return "", "", nil, fmt.Errorf("decode work generation poison pre-hashes: %w", err)
+		}
+	}
+	return types.StepName(phase), reason, preHashes, nil
+}
+
+// ClearWorkGenerationPoison clears a reconciled unauthorized-write poison for a run.
+func (d *DB) ClearWorkGenerationPoison(runID string) error {
+	if _, err := d.sql.Exec(`DELETE FROM work_generation_poison WHERE run_id = ?`, runID); err != nil {
+		return fmt.Errorf("clear work generation poison: %w", err)
+	}
+	return nil
 }
 
 // GetWorkGenerationSummary builds a publishable summary for a run.

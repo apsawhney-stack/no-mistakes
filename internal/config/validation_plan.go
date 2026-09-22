@@ -109,6 +109,9 @@ func (r *ValidationPlanRaw) ToValidationPlan(cfg *Config) types.ValidationPlan {
 	if _, ok := writeSets["lint"]; !ok {
 		writeSets["lint"] = []string{}
 	}
+	if _, ok := writeSets["lint_fix"]; !ok {
+		writeSets["lint_fix"] = defaultLintFixWriteSet()
+	}
 	if _, ok := writeSets["test_fix"]; !ok {
 		writeSets["test_fix"] = defaultLintFixWriteSet()
 	}
@@ -172,13 +175,11 @@ func DefaultConservativeValidationPlan(cfg *Config) types.ValidationPlan {
 		"document":     {"docs/**", "*.md", "README*"},
 		"document_fix": {"docs/**", "*.md", "README*"},
 		"lint":         {},
+		"lint_fix":     defaultLintFixWriteSet(),
 		"push":         {},
 		"pr":           {},
 		"ci":           {},
 		"ci_fix":       defaultLintFixWriteSet(),
-	}
-	if cfg != nil && cfg.Commands.Lint != "" {
-		writeSets["lint_fix"] = defaultLintFixWriteSet()
 	}
 	exclusions := defaultProtectedExclusions()
 	if cfg != nil && len(cfg.ProtectedPaths) > 0 {
