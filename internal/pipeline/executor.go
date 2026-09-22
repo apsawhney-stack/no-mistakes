@@ -1213,10 +1213,11 @@ rounds:
 				return false, "", fmt.Errorf("step %s check post-state: %w", stepName, vErr)
 			}
 			if !verdict.Allowed {
+				reason := verdict.Reason
 				if err := e.workGenManager.RestoreSnapshot(ctx, preSnapshot); err != nil {
-					return false, "", fmt.Errorf("step %s restore unauthorized writes: %w", stepName, err)
+					reason = fmt.Sprintf("%s; automatic restore incomplete: %v", reason, err)
 				}
-				unauthOutcome := UnauthorizedWriteOutcome(stepName, verdict.UnauthorizedPaths, verdict.Reason)
+				unauthOutcome := UnauthorizedWriteOutcome(stepName, verdict.UnauthorizedPaths, reason)
 				outcome.NeedsApproval = true
 				outcome.Findings = mergeFindingsJSON(outcome.Findings, unauthOutcome.Findings)
 			} else if len(verdict.ModifiedPaths) > 0 || verdict.HeadChanged {
