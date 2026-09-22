@@ -419,7 +419,7 @@ func commitAllowedPhaseMutation(ctx context.Context, workDir string, stepName ty
 	if strings.TrimSpace(staged) == "" {
 		return "", nil
 	}
-	if _, err := git.Run(ctx, workDir, "commit", "-m", fmt.Sprintf("no-mistakes: record %s mutation round %d", stepName, roundNum)); err != nil {
+	if _, err := git.Run(ctx, workDir, "commit", "--no-verify", "-m", fmt.Sprintf("no-mistakes: record %s mutation round %d", stepName, roundNum)); err != nil {
 		return "", err
 	}
 	return git.HeadSHA(ctx, workDir)
@@ -443,6 +443,21 @@ func dirtyMutationPaths(ctx context.Context, workDir string, paths []string) ([]
 		}
 	}
 	return dirty, nil
+}
+
+func (e *Executor) phaseResultEvidence(ctx context.Context, runID string, stepName types.StepName, workDir string) (string, string, error) {
+	if stepName == types.StepTest {
+		evidenceID, outputDigest, err := publicEvidenceIdentity(runID, stepName, e.runEvidenceDir(runID))
+		return evidenceID, outputDigest, err
+	}
+	if stepName == types.StepCI {
+		head, err := git.HeadSHA(ctx, workDir)
+		if err != nil {
+			return "", "", nil
+		}
+		return "", strings.TrimSpace(head), nil
+	}
+	return "", "", nil
 }
 
 func (e *Executor) stepIndex(name types.StepName) (int, error) {
@@ -633,7 +648,11 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 			return err
 		}
 		if e.workGenManager != nil {
-			if _, err := e.workGenManager.RecordPhaseResult(ctx, gate.step.Name(), types.PhaseResultStatusPassed, string(gate.step.Name()), "", "", nil); err != nil {
+			evidenceID, outputDigest, err := e.phaseResultEvidence(ctx, run.ID, gate.step.Name(), workDir)
+			if err != nil {
+				return fmt.Errorf("record recovered step %s evidence identity: %w", gate.step.Name(), err)
+			}
+			if _, err := e.workGenManager.RecordPhaseResult(ctx, gate.step.Name(), types.PhaseResultStatusPassed, string(gate.step.Name()), evidenceID, outputDigest, nil); err != nil {
 				return fmt.Errorf("record recovered phase result %s: %w", gate.step.Name(), err)
 			}
 		}
@@ -1756,19 +1775,9 @@ done:
 	if e.workGenManager != nil {
 		switch status {
 		case types.StepStatusCompleted:
-			evidenceID := ""
-			outputDigest := ""
-			if stepName == types.StepTest {
-				var evidenceErr error
-				evidenceID, outputDigest, evidenceErr = publicEvidenceIdentity(run.ID, stepName, sctx.EvidenceDir)
-				if evidenceErr != nil {
-					return false, "", fmt.Errorf("record step %s evidence identity: %w", stepName, evidenceErr)
-				}
-			}
-			if stepName == types.StepCI {
-				if head, err := git.HeadSHA(ctx, workDir); err == nil {
-					outputDigest = strings.TrimSpace(head)
-				}
+			evidenceID, outputDigest, evidenceErr := e.phaseResultEvidence(ctx, run.ID, stepName, workDir)
+			if evidenceErr != nil {
+				return false, "", fmt.Errorf("record step %s evidence identity: %w", stepName, evidenceErr)
 			}
 			_, _ = e.workGenManager.RecordPhaseResult(ctx, stepName, types.PhaseResultStatusPassed, string(stepName), evidenceID, outputDigest, nil)
 			if stepName == types.StepReview {
