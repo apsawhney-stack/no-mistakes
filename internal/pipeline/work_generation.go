@@ -466,10 +466,10 @@ func (m *WorkGenerationManager) HandleMutation(ctx context.Context, cause string
 		return nil, fmt.Errorf("cannot mutate without an active generation")
 	}
 
-	// Check if any mutated file matches selected inputs
+	// Check if any mutated file matches selected inputs or generation control inputs.
 	affectsSelectedInputs := false
 	for _, f := range mutatedFiles {
-		if m.matchesSelectedInputs(f) {
+		if m.matchesSelectedInputs(f) || isGenerationControlPath(f) {
 			affectsSelectedInputs = true
 			break
 		}
@@ -1015,18 +1015,47 @@ func (m *WorkGenerationManager) scanWorkTreeHashesLocked() (map[string]string, e
 	return hashes, err
 }
 
+func recognizedDependencyLockfiles() []string {
+	return []string{"go.sum", "package-lock.json", "yarn.lock", "Cargo.lock"}
+}
+
+func isGenerationControlPath(file string) bool {
+	clean := filepath.ToSlash(strings.TrimSpace(file))
+	if clean == ".no-mistakes.yaml" {
+		return true
+	}
+	for _, lockFile := range recognizedDependencyLockfiles() {
+		if clean == lockFile {
+			return true
+		}
+	}
+	return false
+}
+
 func (m *WorkGenerationManager) computeDependencyLockDigestLocked() string {
 	if m.workDir == "" {
 		return ""
 	}
-	for _, lockFile := range []string{"go.sum", "package-lock.json", "yarn.lock", "Cargo.lock"} {
+	var entries []string
+	for _, lockFile := range recognizedDependencyLockfiles() {
 		p := filepath.Join(m.workDir, lockFile)
-		if data, err := os.ReadFile(p); err == nil {
-			h := sha256.Sum256(data)
-			return hex.EncodeToString(h[:])
+		data, err := os.ReadFile(p)
+		if err != nil {
+			continue
 		}
+		h := sha256.Sum256(data)
+		entries = append(entries, lockFile+"\x00"+hex.EncodeToString(h[:]))
 	}
-	return "no-lock"
+	if len(entries) == 0 {
+		return "no-lock"
+	}
+	sort.Strings(entries)
+	h := sha256.New()
+	for _, entry := range entries {
+		h.Write([]byte(entry))
+		h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 func (m *WorkGenerationManager) computeConfigDigestLocked() string {
