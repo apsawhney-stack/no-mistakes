@@ -1255,6 +1255,9 @@ rounds:
 					if _, err := e.workGenManager.HandleMutation(ctx, fmt.Sprintf("%s_fix_round_%d", stepName, roundNum), stepName, currentHead, verdict.ModifiedPaths); err != nil {
 						return false, "", fmt.Errorf("step %s handle fix mutation: %w", stepName, err)
 					}
+					if stepName.Order() > types.StepReview.Order() {
+						outcome.RestartFrom = types.StepReview
+					}
 				}
 			}
 		}
