@@ -1116,7 +1116,9 @@ func (m *WorkGenerationManager) computeToolchainDigestLocked() string {
 			return "missing:" + phase
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		out, err := exec.CommandContext(ctx, argv[0], argv[1:]...).CombinedOutput()
+		cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+		cmd.Dir = m.workDir
+		out, err := cmd.CombinedOutput()
 		cancel()
 		if err != nil {
 			return "failed:" + phase + ":" + strings.Join(argv, " ")
@@ -1293,18 +1295,23 @@ func (m *WorkGenerationManager) reconcileLedgerClosuresLocked(newGenID string, m
 
 	mutatedMap := make(map[string]bool)
 	generationControlMutation := false
+	selectedInputMutation := false
 	for _, f := range mutatedFiles {
 		clean := filepath.ToSlash(f)
 		mutatedMap[clean] = true
 		if isGenerationControlPath(clean) {
 			generationControlMutation = true
 		}
+		if m.matchesSelectedInputs(clean) {
+			selectedInputMutation = true
+		}
 	}
 
 	for _, e := range entries {
 		if e.Status == types.FindingLedgerStatusClosedVerified {
+			unanchored := strings.TrimSpace(e.File) == "" && strings.TrimSpace(e.LastObservedFile) == ""
 			// If file was mutated (or all if empty list)
-			if len(mutatedFiles) == 0 || generationControlMutation || mutatedMap[filepath.ToSlash(e.File)] || mutatedMap[filepath.ToSlash(e.LastObservedFile)] {
+			if len(mutatedFiles) == 0 || generationControlMutation || (selectedInputMutation && unanchored) || mutatedMap[filepath.ToSlash(e.File)] || mutatedMap[filepath.ToSlash(e.LastObservedFile)] {
 				event := &types.FindingLedgerEvent{
 					ID:           "fe-" + e.ID + "-" + newGenID,
 					EntryID:      e.ID,
